@@ -1,0 +1,11 @@
+{
+  "name": "fusion360-mcp",
+  "description": "Drive the Autodesk Fusion 360 MCP server reliably. Parametric constrained sketches, extrudes, holes, fillets, multi-body modeling, assemblies and components, as-built joints and motion (hinges, sliders), print-in-place mechanisms and print orientation, exports to STL/3MF/STEP, undo/redo, screenshots with explicit camera control, plus a catalog of failure modes and fixes from real product design sessions.",
+  "version": "1.1.0",
+  "author": {
+    "name": "Michael Frostbutter"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/Mfrostbutter/fusion-cad",
+  "repository": "https://github.com/Mfrostbutter/fusion-cad"
+}
