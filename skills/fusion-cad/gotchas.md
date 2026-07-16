@@ -748,3 +748,111 @@ assert abs(after - before) > 1.0, f"volume unchanged ({after:.1f}) -> geometry i
 ```
 
 Two identical volumes across two parameter values is never a coincidence worth accepting. Rebuild the sketch at the new value.
+
+## `importSVG` scale depends on the SVG's units, and unitless means px at 96 DPI
+
+`importSVG(file, x, y, scale)` has no fixed unit contract. What `scale` means depends on how the SVG declares its own size:
+
+- SVG whose `width`/`height` map to mm: `scale = target_mm / native_units` lands exactly.
+- SVG with **unitless** `width="1275"`: Fusion reads those as **CSS pixels at 96 DPI**, so the same formula comes out **25.4/96 = 0.2646x too small**.
+
+Observed on one machine, same session, two files: an artwork whose units were mm imported at exactly the requested 44.00mm, while a generated `width="1275"` file asked for 72.8mm and delivered **19.17mm**. The ratio is 3.7795 = 96/25.4, which is the tell. If your import comes back 3.78x small (or 3.78x large), this is why.
+
+Do not hand-derive the scale. **Probe it:**
+
+```python
+s = (target_mm / art_units) * (96.0 / 25.4)   # only if the file is unitless
+pr = root.sketches.add(plane)
+pr.importSVG(SVG, 0, 0, s)
+w = (bbox_of(pr)[1] - bbox_of(pr)[0]) * 10
+pr.deleteMe()
+assert abs(w - target_mm) < 0.5, f"scale wrong: got {w:.2f}"
+```
+
+Better: always probe-import, measure, and correct by the measured ratio (`s2 = s * target / measured`). That is unit-agnostic and survives whatever the next file declares. You need a probe pass anyway, because `importSVG` also anchors to the viewBox origin rather than the content bounds.
+
+## Do not filter SVG counters by area; pair them to their parent by containment
+
+The tempting filter for "which imported profiles are letter counters" is a size threshold: keep profiles with `profileLoops.count > 1` or `area > threshold`, drop the rest. It works only when every counter happens to be smaller than every real shape. **That is a property of one particular logo, not a rule.**
+
+Counter-example from a real hand-lettered wordmark: a counter of **32.44 mm²** whose parent ring was **59.65 mm²**, on the same artwork as legitimate ink parts of **13.83** and **21.63 mm²**. Any threshold that dropped the counter also dropped real letters, and any threshold that kept the letters also filled the counter.
+
+Pair each counter to the profile that owns it:
+
+```python
+info = []
+for i in range(sk.profiles.count):
+    p = sk.profiles.item(i); bb = p.boundingBox
+    info.append(dict(i=i, p=p, loops=p.profileLoops.count,
+                     x0=bb.minPoint.x*10, x1=bb.maxPoint.x*10,
+                     y0=bb.minPoint.y*10, y1=bb.maxPoint.y*10))
+
+def inside(a, b, m=0.01):
+    return (a['x0'] > b['x0']+m and a['x1'] < b['x1']-m and
+            a['y0'] > b['y0']+m and a['y1'] < b['y1']-m)
+
+counters = set()
+for par in [d for d in info if d['loops'] > 1]:
+    cand = [d for d in info if d['loops'] == 1 and inside(d, par)]
+    assert len(cand) == 1, f"ambiguous: {len(cand)} candidates"
+    counters.add(cand[0]['i'])
+```
+
+**Verify by volume, not by eye.** Extrude the kept profiles and check the volume delta equals `kept_area * icon_t` exactly. If a counter got filled, the delta comes out high by that counter's area. On one build the emboss added 1,073.1 mm³ against a kept area of 1,073.13 mm² at 1.0mm: proof to the decimal that no counter was filled.
+
+### The bbox version false-positives as soon as shapes overlap
+
+Bounding-box containment is a proxy for real containment and it breaks when two drawn shapes overlap: the overlap sliver's bbox can sit entirely inside a neighbour's bbox and read as a hole.
+
+Hit on a clapperboard glyph where a tilted stick overlapped a slate: the test found **4 holes when 3 were drawn**. Nothing was wrong with the geometry; the test was wrong.
+
+When you drew the detail yourself, **match centroids to the coordinates you drew** instead. It is exact and cannot be fooled by overlap:
+
+```python
+want = [(cx + slot(lx)[0], cy + slot(lx)[1]) for lx in SLOT_XS]
+holes = {i for i in range(sk.profiles.count)
+         if min(math.hypot(cen(i).x*10-wx, cen(i).y*10-wy) for wx, wy in want) < 0.4}
+assert len(holes) == len(want)
+```
+
+Print the distances. A clean match shows an obvious gap (observed: slots at 0.000-0.071mm, nearest non-slot at 0.726mm). If that gap is not obvious, the match is not safe.
+
+## A cut from the wrong face has the SAME volume as a cut from the right one
+
+The volume-diff rule catches geometry that did not move. It cannot catch geometry that moved to the wrong place, and pocket direction is the case that bites.
+
+Extruding a pocket sketch from the XY plane at Z=0 with a positive distance cuts **upward from the bottom face**. If you wanted the pocket to open at the top, you get a void buried against the build plate, a solid top face, and **exactly the same volume**, because the same amount of material is removed either way.
+
+Symptoms: the render looks solid from above, the part prints with holes face-down on the plate, and nothing mates. Volume, mass, and bounding box all agree with the correct part.
+
+Cut downward from a plane at the top instead:
+
+```python
+pi = root.constructionPlanes.createInput()
+pi.setByOffset(root.xYConstructionPlane, adsk.core.ValueInput.createByString('base_h'))
+top = root.constructionPlanes.add(pi); top.name = 'base_top_plane'
+sk = root.sketches.add(top)
+...
+ei.setDistanceExtent(False, adsk.core.ValueInput.createByString('-socket_d'))   # negative
+```
+
+Assert on the **face position**, which is the only signal that differs:
+
+```python
+floors = [round(f.boundingBox.minPoint.z*10, 2) for f in faces_matching(body, sock_y)]
+assert abs(floors[0] - (BASE_H - SOCKET_D)) < 0.05, f"socket opens the wrong way: {floors}"
+```
+
+Generalises: for any feature where a sign error still removes the same material (pockets, counterbores, recesses), verify **where a face landed**, never the volume.
+
+## An exception rolls back the entire `execute`, including geometry that succeeded
+
+The tool runs each `execute` as one transaction. A traceback anywhere discards **everything the script built**, not just the failing step.
+
+Cost a full rebuild once: a script created 6 bodies correctly, then threw `AttributeError` in the *reporting* code at the very end (`BoundingBox3D.combine` returns a bool and mutates in place, so `tot = tot.combine(bb) or tot` blows up). The geometry was perfect. The next call reported `bodies=0`.
+
+So:
+
+- Keep verification/printing trivially safe, or put it in a **separate** `execute` after the build lands.
+- Make build scripts **idempotent** (delete-by-name at the top) so a rerun after a rollback is free.
+- This is not a reason to `try/except` around `run()`. Swallowing the traceback loses the diagnosis and still rolls back. Fix the reporting bug.

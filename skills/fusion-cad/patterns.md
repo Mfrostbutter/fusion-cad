@@ -74,6 +74,7 @@ Internal units are cm. `ValueInput.createByString('30 mm')` accepts unit suffixe
 54b. Keyed tab + socket that survives a flat print
 55. Trace a silhouette from a screenshot (pixel table to mm)
 56. Variant matrix from one design: name the axes into the filename
+57. Fit artwork to a print: measure the gaps, not the strokes
 
 ## 1. Idempotent user-parameter add
 
@@ -1650,7 +1651,7 @@ bracket-magnet-text-t10
 Build the matrix with the expensive axis outermost, so the costly feature is built once per value rather than once per file:
 
 ```python
-for face in ('n8n', 'automate'):      # outermost: rebuilding this is expensive
+for face in ('logo', 'text'):        # outermost: rebuilding this is expensive
     set_face(root, plane, face)
     for mount in ('stand', 'magnet'):
         set_mount(root, mount)
@@ -1666,3 +1667,57 @@ Assert per-variant invariants **inside** the loop, not once at the end. Cheap on
 Also disclose which axes are **not** visible in the bounding box. Two face treatments occupy the same face, so nothing in the geometry summary tells them apart. Record a discriminator in the SKU README (triangle count works: an imported-SVG logo carried 4,316 tris against a text treatment's 3,886) so a future reader can identify a stray file without opening CAD.
 
 Finally: when an axis collapses (a thickness gets dropped), archive the retired files **with a README explaining why**, and check whether any of them were wrong. A dropped axis is the best moment to notice that its files never worked; see the volume-diff rule in `gotchas.md`.
+
+## 57. Fit artwork to a print: measure the gaps, not the strokes
+
+Before putting any logo, wordmark, or dense artwork on a part, work out the size it must be to survive the nozzle. The answer is usually driven by the **negative space between shapes**, not the shapes themselves, and it is usually much bigger than expected.
+
+Two independent floors:
+
+- **stroke**: a raised wall needs >= ~1 nozzle (0.4mm) to extrude at all
+- **gap**: a valley between two raised walls needs ~2 nozzle widths (0.8mm) or the slicer merges them into a blob
+
+Measure both from the source raster with a distance transform. The ridge (local maxima of the DT) along a shape's spine gives that shape's half-width; take a low percentile, not the global min, which is just antialiasing on every edge:
+
+```python
+def ridge(binary):
+    dt = ndimage.distance_transform_edt(binary)
+    mx = ndimage.maximum_filter(dt, size=3)
+    r = (dt > 0) & (dt >= mx - 1e-9) & (dt > 1.0)
+    return dt[r] * 2.0                      # full widths, px
+
+strokes = ridge(ink)
+gaps    = ridge(~ink & bbox_of(ink))        # restrict: outside the artwork is background
+min_w_for_gaps = 0.8 * bbox_width_px / np.percentile(gaps, 5)
+```
+
+Report the **distribution**, not one number. "5th percentile" alone cannot tell a few pinch points from a systemically tight logo, and that difference decides whether you can ship it:
+
+```
+   width |  <0.4mm |  <0.6mm |  <0.8mm
+    60mm |   12.6% |   37.3% |   55.7%     <- half the logo fuses. dead.
+    90mm |    0.5% |   12.6% |   27.4%     <- borderline
+   120mm |    0.5% |    1.5% |   12.6%     <- fine
+```
+
+### Trading stroke weight for gap width
+
+If the strokes have headroom and the gaps do not (the common case for hand-lettered or display type), **erode the artwork**: eroding by k widens every gap by 2k while narrowing every stroke by 2k.
+
+Erosion is only safe while **topology holds**. Check part and hole counts, not just widths, because the failure mode is letters snapping apart or counters closing:
+
+```python
+p0, h0 = ndimage.label(ink)[1], ndimage.label(~ink)[1] - 1
+for k in range(0, 9):
+    e = binary_erosion(ink, disk(k))
+    p, h = ndimage.label(e)[1], ndimage.label(~e)[1] - 1
+    ok = gap_p5(e) >= 0.8 and wall_p5(e) >= 0.5 and (p, h) == (p0, h0)
+```
+
+Real result: a wordmark needing **127mm** unmodified printed cleanly at **72.8mm** with 3px of erosion (0.17mm per edge, invisible), topology intact at 11 parts / 4 counters. At 7px the letters broke (11 -> 14 parts) while the widths still looked fine. **The width check passes long after the artwork has shattered; only the topology check catches it.**
+
+Render an original / eroded / difference triptych and look at it. Numbers cannot tell you it still looks like the brand.
+
+### Getting permission first
+
+Eroding is **modifying someone's mark**. That is a design decision with a legal edge, not a technical one. Ask before doing it, and record who said yes. A licence to *use* a mark is not a licence to *redraw* it, and the person who owns it may care about 0.17mm more than you would guess.
