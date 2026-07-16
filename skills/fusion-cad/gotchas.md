@@ -2,6 +2,32 @@
 
 Failure modes from production sessions plus stress-test findings. Each entry: what happens, why, the fix.
 
+## Lock-badge display lag on standalone script-built sketches (G9 corrected 2026-05-31)
+
+A sketch that is built by a script AND is not immediately consumed by a downstream feature in the same script can be fully constrained AND have a working parametric link to user parameters, while its browser-tree icon shows NO lock badge until you enter edit mode once. After exiting edit mode the badge stays. `design.computeAll()` does NOT force the badge to update.
+
+Sketches that ARE immediately consumed by an extrude / cut / revolve / etc. in the same script render their lock badge correctly right away. The feature creation appears to force the UI refresh. Verified in the claude-test mounting plate build, 2026-05-31: `plate_outline` (consumed by extrude) and `hole_outline` (consumed by cut) both showed lock badges immediately; the earlier standalone `claude_test_g9_*` lab sketches did not.
+
+This is purely cosmetic. The constraint state was correct the whole time. The API flag (`Sketch.isFullyConstrained`) is honest. The geometry follows parameter changes correctly.
+
+**What this gotcha replaces.** An earlier version of this entry claimed parameter-name expressions in sketch dims silently fail to constrain the geometry. That claim was wrong and was the result of taking the absent lock badge as evidence of constraint failure without testing parametric propagation. The corrected understanding is documented in `discovery-2026-05-31-constraints-corrected.md`, which supersedes `discovery-2026-05-30-constraints.md`.
+
+**How to verify a sketch is really constrained without entering edit mode:**
+
+1. Check `Sketch.isFullyConstrained` — should be True.
+2. If the sketch dim uses a parameter expression: change the parameter value programmatically, call `design.computeAll()`, then read the dim's `parameter.value`. If it tracks the parameter change, the parametric link is live. If it stays frozen, something is genuinely broken.
+3. Browser-tree badge absence alone is not evidence of failure.
+
+**Open question.** Whether `Sketch.activate()` (or equivalent) forces the badge to render without requiring the user to click in. Untested; would let a canonical sketch helper leave visibly-locked sketches behind.
+
+**Rule.** Trust `isFullyConstrained` plus a parametric round-trip. Don't trust the badge for state, only for "user-visible-confirmation."
+
+## Lock-badge advice from older sessions
+
+A previous entry in this file said the lock badge is ground truth and `isFullyConstrained` can lie. We have NOT reproduced a case where `isFullyConstrained` returns True for an actually-broken sketch in current Fusion (May 2026 build). The cases the previous advice was rooted in may have been the same display-lag misobservation that the corrected G9 above documents. If you do hit a case where the API flag and the live parametric round-trip disagree, log it as a new gotcha with a reproducer.
+
+In-canvas line colors are still a useful tell when you ARE in edit mode: black = driving + fully constrained, blue = driving + under-constrained, red = over-constrained / conflict. The small red "pencil tip" in the default sketch icon is NOT a constraint indicator.
+
 ## Sketch plane orientation surprises
 
 **XY plane (safe default).** Sketch X maps to world X, sketch Y maps to world Y. Extrude in `+Z` direction goes up. No surprises.
@@ -137,6 +163,243 @@ Also: `userConfirmedSaveAndClose: true` on an Untitled doc still fails with the 
 
 The 3MF export function is `em.createC3MFExportOptions`, not `em.create3MFExportOptions`. Common signature-guess miss. The C prefix is consistent with how Fusion versions its color-capable formats.
 
+## ExportManager methods are `create*ExportOptions`, never `create*ExportInput` (2026-07-16)
+
+Every other feature in the API uses the `createInput` naming convention, so `em.createSTLExportInput(...)` is the natural guess and it is wrong:
+
+```
+AttributeError: 'ExportManager' object has no attribute 'createSTLExportInput'.
+Did you mean: 'createSTLExportOptions'?
+```
+
+The whole family is `Options`: `createSTLExportOptions`, `createC3MFExportOptions`, `createFusionArchiveExportOptions`, `createSTEPExportOptions`, `createOBJExportOptions`, `createIGESExportOptions`, `createSATExportOptions`, `createSMTExportOptions`, `createUSDExportOptions`, `createDXFFlatPatternExportOptions`, `createDXFSketchExportOptions`.
+
+Two further traps:
+
+- **The filename is a constructor arg, not a property.** `em.createSTLExportOptions(geometry, filename)`. There is no `.filename =` step for STL/3MF (unlike some older snippets).
+- **Argument order flips for the Fusion archive.** It is `createFusionArchiveExportOptions(filename, component)` — filename FIRST — while STL/3MF are `(geometry, filename)`. Easy silent mix-up.
+
+**Rule.** When unsure of an ExportManager signature, print the surface first; it is one cheap call and beats a failed round-trip:
+
+```python
+print([m for m in dir(design.exportManager) if 'Options' in m])
+```
+
+## Screenshot base64 can blow the tool-result token limit (2026-07-16)
+
+`mcp__fusion__screenshot` returns base64 inline. At 1200px wide with `transparent=false` a single screenshot ran ~148,700 characters and was rejected/spilled to a file, costing a round-trip for nothing.
+
+Also: `transparent=true` (the default) on a light-coloured body over a light background renders an image that reads as blank/washed out.
+
+**Rule.** For anything above roughly 800px, or any repeated visual-check loop, skip the screenshot tool and write the file yourself, then read it back:
+
+```python
+vp = app.activeViewport
+vp.fit(); vp.refresh(); adsk.doEvents()
+vp.saveAsImageFile('C:/abs/path/shot.png', 1400, 780)
+```
+
+Then `Read` the PNG. Cheaper, higher resolution, no transparency surprise, and the file can be dropped straight into `catalog/<SKU>/docs/`.
+
+## `viewExtents` is in cm (internal units), like everything else (2026-07-16)
+
+Setting `cam.viewExtents = 22.0` intending "22mm across" gives a 220mm-wide view, i.e. fully zoomed out. Same cm rule as all other geometry. For a ~32mm-tall view use `3.2`. Also set `cam.isFitView = False` before hand-placing `eye`/`target`, or the fit overrides your framing.
+
+## Imported SVG curves are FIXED — `sketch.move()` silently does nothing (2026-07-16)
+
+`sketch.importSVG(filename, x, y, scale)` brings geometry in as **fixed** sketch curves. Any later attempt to reposition them is a silent no-op:
+
+```python
+sk.importSVG(SVG, 0, 0, s)
+# ... compute dx, dy to centre it ...
+sk.move(coll, matrix)     # returns without error, moves NOTHING
+```
+
+No exception, no `False` return. The bounding box afterwards is byte-identical to before, which is the only tell.
+
+**Rule.** Place at import time using the position args. The anchor is the SVG's **top-left**, and geometry extends **+X / -Y** from it. To centre a logo of final size `w` x `h` on a target point:
+
+```python
+s = target_w / native_w_at_scale_1
+ax_cm = (target_cx - w/2) / 10.0
+ay_cm = (target_cy + h/2) / 10.0
+sk.importSVG(SVG, ax_cm, ay_cm, s)
+```
+
+Measure `native_w_at_scale_1` with a throwaway import at `scale=1.0` first; scaling is linear and aspect is preserved to ~0.1%.
+
+## SVG holes come back as SEPARATE profiles — extruding all of them fills the logo in (2026-07-16)
+
+After `importSVG`, counters and ring interiors are their own profiles. Extruding every profile turns letter counters solid and fills ring shapes: an "8" becomes a blob, an outlined circle becomes a disc.
+
+Real example (n8n logo, 10 profiles): 1 five-loop graph mark, 1 three-loop "8", 2 single-loop "n" letters, and **6 hole profiles** (four node counters at 4.72 mm² each, two "8" counters at 2.32 and 3.15 mm²).
+
+Fusion represents a region-with-holes as a profile whose `profileLoops.count > 1` (first loop `isOuter=True`, the rest `False`), and *also* emits each hole as its own single-loop profile.
+
+**Rule.** Filter before extruding:
+
+```python
+thresh = 100.0 * s * s          # mm^2, scaled with the import; tune per asset
+keep = adsk.core.ObjectCollection.create()
+for i in range(sk.profiles.count):
+    pr = sk.profiles.item(i)
+    area = pr.areaProperties(
+        adsk.fusion.CalculationAccuracy.LowCalculationAccuracy).area * 100.0
+    if pr.profileLoops.count > 1 or area > thresh:
+        keep.add(pr)
+```
+
+Keep multi-loop profiles unconditionally (they already carry their holes), plus single-loop profiles above an area threshold (the solid letters). Print the kept/dropped split and eyeball it once per new asset — the threshold is asset-specific, not universal.
+
+## `importSVG` anchors to the viewBox origin, not the content bounds (2026-07-16)
+
+Placement maths derived from the content bounding box will be off by however much padding sits between the viewBox origin and the artwork. Real case: horizontal placement was exact, vertical was **5.0mm out**, because the SVG's content did not start at the viewBox's top edge.
+
+**Rule.** Never hand-derive the anchor. Two-pass it:
+
+```python
+# pass 1: probe at (0,0), measure what you actually get
+pr = root.sketches.add(plane); pr.name = '_probe'
+pr.importSVG(SVG, 0, 0, s)
+u0, u1, v0, v1 = sk_bbox(pr)          # min/max of every sketchCurve bbox
+pr.deleteMe()
+
+# pass 2: shift by the measured delta (import x/y translate sketch coords 1:1)
+du = target_u_min - u0
+dv = target_v_min - v0
+sk = root.sketches.add(plane)
+sk.importSVG(SVG, du, dv, s)
+```
+
+The `(x, y)` args translate the import in sketch space exactly, so the delta from a probe is always correct regardless of internal padding.
+
+## Sketch curve `boundingBox` is in SKETCH space, not world (2026-07-16)
+
+`sketchCurve.boundingBox` returns coordinates in the sketch's own U/V frame with Z always 0. On an XY sketch at the origin the two frames coincide, so this goes unnoticed for a long time — then you put a sketch on an offset or rotated plane and every bounds assert is silently meaningless (a front-face sketch reported `Z 0.00..0.00` for geometry genuinely spanning Z 4..20).
+
+**Rule.** Convert before asserting against world bounds:
+
+```python
+wp = sk.sketchToModelSpace(adsk.core.Point3D.create(u, v, 0))
+```
+
+To learn a plane's mapping, transform three points and diff them:
+
+```python
+a  = sk.sketchToModelSpace(P(0,0,0))
+bU = sk.sketchToModelSpace(P(1,0,0))   # dU = bU - a -> world dir of sketch +U
+bV = sk.sketchToModelSpace(P(0,1,0))   # dV = bV - a -> world dir of sketch +V
+```
+
+For an XZ-offset plane this returns `dU=(1,0,0)`, `dV=(0,0,-1)` — confirming sketch +V maps to world **-Z**.
+
+## `ConstructionPlaneInput.setByPlane` throws in parametric mode (2026-07-16)
+
+```
+RuntimeError: 3 : Environment is not supported
+```
+
+`setByPlane(Plane3D)` — the obvious way to get a plane with explicit UV directions — is unavailable in a normal parametric Design. Use `setByOffset` from an origin plane and live with that plane's UV convention, or use `setByThreePoints`.
+
+Consequence worth planning around: you cannot dial in the plane orientation to suit your artwork. Combined with imported SVG being fixed (unmovable, unmirrorable), an SVG on an XZ-derived plane WILL import upside down. The fix is to pre-flip the source file:
+
+```xml
+<svg width="576" height="160" viewBox="0 0 576 160" ...>
+<g transform="translate(0,160) scale(1,-1)">  <!-- original content --> </g>
+</svg>
+```
+
+The plane's flip then cancels the file's flip. Note the build now depends on that generated file, so keep it next to the design and document it.
+
+## `participantBodies` wants a plain list, not an ObjectCollection (2026-07-16)
+
+Every other collection-shaped API arg takes an `ObjectCollection`, so this is a natural mistake:
+
+```python
+ei.participantBodies = coll        # TypeError: argument 2 of type 'std::vector<...BRepBody>'
+ei.participantBodies = [stand]     # correct
+```
+
+## An inset feature on a flat-printed part becomes an unsupported island (2026-07-16)
+
+`OffsetStartDefinition` is the obvious tool for "set this feature back from the face". On a part that prints flat, it can silently destroy a support-free print.
+
+Real case: a locating tab under a sculpture needed to be clear of the visible front face so the face stayed round. Centring it in the thickness (2mm clear of *both* faces) is the symmetric, better-looking answer — and it starts the tab at Z=2 with **nothing beneath it**. The part of the tab overhanging the body outline becomes a floating island 2mm above the plate. Fusion builds it happily; the slicer then demands support on a part whose whole selling point was no supports.
+
+**Rule.** Before insetting a feature with `OffsetStartDefinition` on a flat-printed part, ask what is under it at the start Z. If the feature extends beyond the silhouette of whatever sits below, inset from ONE face only and leave it flush with the plate:
+
+```python
+# floating: needs support where the tab overhangs the body
+ei.startExtent = adsk.fusion.OffsetStartDefinition.create(VI('tab_inset'))
+ei.setDistanceExtent(False, VI('body_t - 2 * tab_inset'))
+
+# grounded: starts at Z=0, still clear of the visible face
+ei.setDistanceExtent(False, VI('body_t - tab_inset'))
+```
+
+Verify it really starts on the plate:
+
+```python
+assert abs(min(tab_face_z)) < 0.01, "feature lifted off the plate - would need support"
+```
+
+Aesthetic symmetry is worth less than a support-free print. Ask which face actually matters.
+
+## Offsetting a feature moves the part in its mate (2026-07-16)
+
+Follow-on from the above, and the kind of thing that only shows up on the printer. Once a tab is inset from one face, it is **no longer centred in the part's thickness**. A socket cut at the mating part's dead centre then parks the part `inset/2` proud of centre — geometrically fine, visibly wrong, and invisible in CAD unless you compute it.
+
+**Rule.** When a locating feature is asymmetric in thickness, shift the socket by half the asymmetry and assert where the part lands:
+
+```python
+socket_cy = BASE_CY + tab_inset/2.0          # tab flush at back, inset at front
+part_back  = socket_cy + (tab_t + clear)/2.0 - clear/2.0
+part_front = part_back - body_t
+assert abs((part_front + part_back)/2.0 - BASE_CY) < 0.2, "part sits off-centre in its mate"
+```
+
+## Isolate a sub-feature's extent with face bounding boxes (2026-07-16)
+
+After a Join, the feature you added is no longer a separate body, so you cannot measure it directly. Filter the merged body's faces by a coordinate you know the feature occupies alone:
+
+```python
+tab_z = []
+for f in body.faces:
+    fb = f.boundingBox
+    if fb.minPoint.y*10 < -69.5:          # only the tab lives below the circles
+        tab_z += [fb.minPoint.z*10, fb.maxPoint.z*10]
+print(f"tab Z {min(tab_z):.2f}..{max(tab_z):.2f}")
+```
+
+This is how you prove an inset actually happened, and that the feature still touches the plate. Body-level bounding boxes cannot tell you either.
+
+## Generated build inputs belong with the design, not in a temp dir (2026-07-16)
+
+If a build consumes a *derived* asset (a pre-flipped SVG, a converted mesh, a generated profile), that file is a build dependency, not a scratch artifact. Left in a temp directory it works all session and breaks silently on the next rebuild after cleanup.
+
+**Rule.** Put generated inputs next to the design (`design/` alongside the CAD source), commit the generator script beside them with a header explaining *why* the derived file exists, and say in the README that the build consumes the derived file rather than the source.
+
+## An emboss on a vertical face needs an explicit sign check (2026-07-16)
+
+Extruding artwork on a face whose plane normal points *into* the solid engraves it instead of embossing it, with no error. Whether you need `icon_t` or `-icon_t` depends on the plane's normal, which for `setByOffset` planes is inherited, not chosen.
+
+**Rule.** Assert the resulting bounds moved the way you intended:
+
+```python
+assert abs(body.boundingBox.minPoint.y*10 - (front_y - icon_t)) < 0.01, \
+    "embossed INWARD - flip the extrude sign"
+```
+
+## Body count is the cheapest correctness check after a Join (2026-07-16)
+
+A Join extrude whose profiles do not actually touch the target silently produces **extra free-floating bodies** instead of failing. This is how an SVG placed slightly off its host face announces itself: the overhanging letters simply become their own bodies.
+
+**Rule.** After any Join that should merge, `assert root.bRepBodies.count == 1` (or whatever the expected count is). It catches mis-placement that a screenshot from the wrong angle will happily hide. Pair it with an explicit bounds assert when placing onto a known face:
+
+```python
+assert min(xs)*10 > face_x_min and max(xs)*10 < face_x_max, "artwork overruns host face"
+```
+
 ## `isRollingBall = True` matters for fillets
 
 Default `FilletFeatureInput` geometry is NOT the spherical-corner blend most CAD users expect. Set `isRollingBall = True` for the standard blend.
@@ -246,37 +509,6 @@ When a script crashes mid-loop, prints from before the crash may not flush in ti
 
 **Rule.** Use `print(name, flush=True)` for diagnostic prints when narrowing a failing iteration, or print AFTER each successful op so the last printed name is the last success and the failure is whatever came next in the input list.
 
-## `dim.parameter.expression = bare_param_name` may not bind on first assignment
-
-Setting `dim.parameter.expression = 'body_width'` immediately after `addDistanceDimension` can silently fail to bind. After the script: `dim.parameter.expression == '70 mm'` (numeric), `dependencyParameters == []`, and `sketch.isFullyConstrained == True` (the API thinks it is fine) while the Fusion UI shows the sketch under-constrained (no lock badge). The API does not error, the constraint count looks right, but the parametric link is broken. The most insidious gotcha in this batch.
-
-Verified behaviors:
-- Bare param name on first assignment: often fails silently, stored as the numeric value at evaluation time.
-- Math expression with the param (`'body_width / 2'`, `'body_width + 0 mm'`): binds reliably on first try.
-- Re-assigning the bare name after the first attempt: the second assignment sticks.
-- Reproduced across 4+ separate sketches. `addDiameterDimension` (patterns.md N7) bound a bare name on first try, so this is NOT 100 percent deterministic across dimension types; it appears specific to `addDistanceDimension`.
-- Extrude extents and construction-plane offsets do NOT have this issue (see patterns.md V2). This affects sketch dimensions only.
-
-**Workarounds (any one works):**
-```python
-# A: use a math expression
-dim.parameter.expression = 'body_width + 0 mm'
-# B: re-assign at the end of sketch construction (cleanest)
-dim.parameter.expression = 'body_width'   # may not stick
-# ... continue building ...
-dim.parameter.expression = 'body_width'   # this one sticks
-# C: verify and retry
-if dim.parameter.dependencyParameters.count == 0:
-    dim.parameter.expression = 'body_width'
-```
-Always check `dependencyParameters` to confirm the expression took parametrically. Open question: whether `design.computeManager.compute()` between creation and assignment fixes it (untested).
-
-## Lock badge is ground truth, not `isFullyConstrained`
-
-A tiny lock overlay on the sketch icon in the browser tree means fully constrained; absence means under-constrained. `Sketch.isFullyConstrained` can return True under conditions where the UI still considers the sketch incomplete (see the bare-name binding gotcha above, and the diagonal-midpoint anti-pattern in patterns.md). During constraint development, the lock badge is ground truth, not the API flag.
-
-In-canvas line colors are the other tell: black = driving + fully constrained, blue = driving + under-constrained, red = over-constrained / conflict. The small red "pencil tip" in the default sketch icon is NOT a constraint indicator; the lock OVERLAY is. When in doubt, look at the line colors in edit mode.
-
 ## RectangularPattern with `isSymmetricInDirectionOne=True` makes wrong or disconnected bodies
 
 Patterning a `JoinFeatureOperation` extrude (single knuckle at X=0) with `quantityOne=3`, `distanceOne='40 mm'`, `ExtentPatternDistanceType`, and `isSymmetricInDirectionOne=True` does NOT produce 3 instances at X=-20, 0, +20. It produces 6 new disconnected bRepBodies at X plus or minus 40 (body count went 2 to 8), and the Join did not merge. The result matches no standard interpretation of the inputs.
@@ -291,8 +523,228 @@ Patterning a `JoinFeatureOperation` extrude (single knuckle at X=0) with `quanti
 
 Setting `jointMotion.rotationValue` / `slideValue` repositions the model, but adding a feature or any recompute (including setting `transform2` or `isGrounded`) resets driven joints to their rest position. Observed repeatedly: a lid driven to 180 degrees snapped back to 0 after new features were added and on every reorientation. Mitigations: set `restValue` on the joint limits (patterns.md N15); always re-drive joints as the final step before screenshot or export. Treat joint drive state as transient.
 
+## Preview API badges are release gates
+
+Symptom: a method exists in the scraped API corpus and works in a local experiment, but Autodesk later changes or removes it and the public plugin/server breaks.
+
+Root cause: some Fusion API pages are explicitly tagged Preview and say not to deliver distributed programs that use preview capabilities.
+
+Current corpus review, 2026-05-31:
+- Stable May 2026 pages: `Component.findMeshUsingRay`, `MeshBody.calculateCollisionsWithRay`, `ConstructionPlaneInput.setByAngleOnCurvedFace`.
+- Preview families: `UserCoordinateSystem*`, `ElectronManager` / Electronics objects, `AssemblyConstraint*`, `VolumetricModel*`.
+
+**Rule.** Use Preview APIs only after explicit user opt-in. Do not put Preview APIs in default public workflows or stable MCP tools.
+
 ## Print-in-place at tight clearances can fuse on FDM (CAD-side print note)
 
-PRINTER-VERIFIED on a captured slider+hinge test part: a print-in-place slider plus hinge at 0.2mm rotational / 0.3mm Z / 1mm Y clearances FUSED on the first Bambu print (moving parts welded to the housing). For this class of part, prefer SEPARATE parts laid out on one plate with assembly clearances (looser, tunable, sandable) over a captured print-in-place mechanism, and use a separate printed or filament/rod pin through the hinge knuckles rather than a print-in-place knuckle. See patterns.md N11 and N17 for the parametric clearance technique and the separate-parts recommendation.
+PRINTER-VERIFIED on a captured slider+hinge test part: a print-in-place slider plus hinge at 0.2mm rotational / 0.3mm Z / 1mm Y clearances FUSED on the first Bambu print (moving parts welded to the housing). For this class of part, prefer SEPARATE parts laid out on one plate with assembly clearances (looser, tunable, sandable) over a captured print-in-place mechanism, and use a separate printed or filament/rod pin through the hinge knuckles rather than a print-in-place knuckle. See patterns.md N11, N17, N44, and N45 for the parametric clearance technique, the separate-parts recommendation, and full hinge recipes.
 
 IF you do commit to a print-in-place hinge, keep its axis HORIZONTAL / parallel to the build plate so the knuckle-separation gaps print as vertical seams (reliably free). Laying the part so the hinge axis is VERTICAL turns those gaps into horizontal layer planes that fuse easily, giving a stiff or welded pivot. Same family as the "flange overhangs need slicer tree supports" note above.
+
+### Clearance recipes from accepted tutorial sources (NOT printer-verified by us)
+
+Recipes recorded so a future first print has a baseline. None of the values below are validated by our own prints; expect to tune for your printer + slicer + material. See patterns.md N44 / N45 for full geometry recipes.
+
+| Source | Mechanism | Per-face clearance | Diametric clearance | Other |
+|---|---|---|---|---|
+| What-Make-Art print-in-place | Captive cone + cylinder, one body | -0.3 mm flat faces, -0.2 mm cone face | n/a (mating faces are flat + cone, not cylindrical) | Cone -35deg taper, 55deg overhang on lead-in walls, 0.8 mm fillet on non-bed edges, 0.8 mm chamfer on bed face |
+| PDO Day 20 snap-hinge | Two separate flanges with nub-in-cavity | n/a (cavity uses Offset Face) | 0.8 mm starting, range 0.2-0.8 mm | Nub taper -10 to -14 deg, 1 mm fillet on nub edge, 0.6 mm Offset Start clearance between mating flanges, 0.1 mm layer height |
+
+Apply Offset Face to all opposing cavity walls SIMULTANEOUSLY with one negative value: the offset applies per-face, so -0.4 mm on opposite cavity walls produces 0.8 mm diametric clearance (PDO Day 20 technique). The number you type into Offset Face is HALF the resulting diametric gap.
+
+Two distinct philosophies are visible in these sources:
+- What-Make-Art treats the cone face as the running surface (tight clearance there for less play) and the flat side faces as the support surfaces (looser clearance for free movement).
+- PDO uses no cone; the cylindrical nub rides in a cylindrical cavity with the cavity over-cut by Offset Face for free running, and a sketch-level taper on the nub (-10 to -14deg) to ease engagement.
+
+Neither source distinguishes by material. PLA, PETG, and ABS will produce different functional clearances at identical CAD dimensions because of layer-line surface roughness and shrinkage. Treat the tabulated values as PLA-on-FDM starting points.
+
+## G10 Stale feature reference after sketch geometry rewrite (2026-05-31)
+
+A script that deletes all curves + dimensions in a sketch and replaces them with new geometry leaves any downstream feature (extrude, cut, fillet, etc.) pointing at a stale profile reference. Symptoms:
+
+- `feature.healthState == 1` with `errorOrWarningMessage` containing "The profile reference is lost and this feature is using cached geometry."
+- API queries on the body's edges show the NEW geometry (Fusion's cached output from the last successful compute).
+- The Fusion UI continues to display the OLD geometry — the cached BREP rendered as-is.
+- `design.computeAll()` does not fix this.
+
+User-visible result: "I don't see any changes" despite the script reporting success and the BREP showing the new geometry.
+
+**Fix.** Don't try to re-bind the feature in place. Delete it and re-create it with a fresh profile reference:
+
+```python
+old = body_comp.features.itemByName("dispense_hole_cut")
+if old and old.healthState != 0:
+    old.deleteMe()
+sk = body_comp.sketches.itemByName("dispense_hole")
+prof = sk.profiles.item(0)
+ext = body_comp.features.extrudeFeatures
+einput = ext.createInput(prof, adsk.fusion.FeatureOperations.CutFeatureOperation)
+einput.startExtent = adsk.fusion.OffsetStartDefinition.create(
+    adsk.core.ValueInput.createByString("slot_chamber_d + slot_narrow_d"))
+einput.setDistanceExtent(False, adsk.core.ValueInput.createByString(
+    "floor_thk - slot_chamber_d - slot_narrow_d"))
+einput.participantBodies = [body_comp.bRepBodies.itemByName("body_main")]
+new_feat = ext.add(einput)
+new_feat.name = "dispense_hole_cut"
+```
+
+**Detection.** After any tool that mutates sketch geometry, audit every downstream feature's health:
+
+```python
+for ft in comp.features:
+    if ft.healthState != 0:
+        print(f"BROKEN {ft.name}: {ft.errorOrWarningMessage[:120]}")
+```
+
+The fusion-cad-mcp tools should run this audit automatically and return broken features in a `warnings` field on the envelope. Full discovery: `discovery-2026-05-31-feature-cache-and-mcp-direct.md`.
+
+## G11 Fillets break when upstream geometry edits move their edges (2026-05-31)
+
+Constant-radius fillets store topological references to the edges they target. Small tweaks survive, but bumping a sketch dimension that moves an edge significantly (10mm+ along its length, or changes its orientation) often pushes the fillet to `healthState == 2` or `3`:
+
+```
+The fillet/chamfer could not be created at the requested size.
+This might be occurring at the ends of the selected edges.
+```
+
+1mm and 2mm fillets fail most often because they can't shrink to fit the new corner geometry. Larger named fillets on stable edges (body outer-corner rounding, cavity interior corners) typically survive.
+
+**Reproduced in a real design session (2026-05-31).** Two sketch-dim edits broke three fillets across the same body:
+
+| Edit (clip_profile sketch) | Broken fillet | Reason |
+|---|---|---|
+| `d278: 65→80mm` (clip top extended +15mm) | `Fillet3` (state=2) | Targeted clip-top corner edge that no longer existed in same form |
+| `d288: 28→43mm` (platform underside Z=60→75) | `Fillet4` (state=3) | Targeted edge whose Z range shifted |
+
+**Fix.** SUPPRESS, don't delete. Lets the user re-enable or repair interactively, and signals the feature was lost but not abandoned.
+
+```python
+ft = body_comp.features.itemByName("Fillet3")
+if ft and ft.healthState != 0:
+    ft.isSuppressed = True
+    design.computeAll()
+```
+
+**Don't try to auto-repair fillet edge references from a script.** Edge identity after BREP regeneration is unstable; re-selecting "the same" edge requires a geometric query (find an edge whose endpoints match the previous ones at a tolerance), which is error-prone and design-specific. Cheaper to surface the breakage to the user and ask them whether the missing fillet matters.
+
+**Detection.** Same health-audit sweep as G10. Always run it after any edit that touches body sketches or extrude depths.
+
+## G12 Re-binding the timeline marker forces full re-render (2026-05-31)
+
+When the Fusion UI is showing a stale cached state (often after G10/G11 fixes), a hard repaint can be forced by rolling the timeline marker to position 0 and back to the end:
+
+```python
+tl = design.timeline
+end = tl.count
+tl.markerPosition = 0
+tl.markerPosition = end
+app.activeViewport.refresh()
+```
+
+`computeAll()` re-evaluates features in place but does not always trigger a full UI re-rasterize. The marker round-trip does. Use sparingly — it's a noticeable user-visible flash and re-evaluates the entire feature tree. Save and reopen is the bigger hammer if even this doesn't work.
+
+## SketchText cannot be mirrored, and rotating it 180 degrees mirrors it instead
+
+Same family as the fixed-imported-SVG problem, and it bites in the same place: a sketch plane whose +V maps to world -Z (any plane derived from XZ). Text drawn upright in sketch UV comes out upside down in the world.
+
+For imported SVG the fix is a pre-flipped file (`<g transform="translate(0,H) scale(1,-1)">`). **That fix does not transfer to text.** `SketchText` is not a file you can pre-process, and it cannot be mirrored after creation any more than fixed SVG curves can.
+
+The trap is the obvious workaround. Rotating the text 180 degrees (the last arg of `setAsMultiLine`) looks like it should cancel the flip. It does not:
+
+- a 180 degree rotation flips **both** U and V
+- the plane flips **only** V
+- net effect: U is flipped alone, so the text is upright but **mirrored**
+
+Mirrored bold text at a glance in a small render reads as correct. This will ship if you do not look at a real screenshot of that face.
+
+The fix that works: **do not sketch on the flipped plane at all.** Build the text on the XY plane where the orientation is unambiguous, extrude as a NewBody, then move the body into place with a rotation.
+
+```python
+ei = exts.createInput(st, adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+ei.setDistanceExtent(False, adsk.core.ValueInput.createByString('0.7 mm'))
+ex = exts.add(ei)
+tools = adsk.core.ObjectCollection.create()
+for i in range(ex.bodies.count):
+    tools.add(ex.bodies.item(i))          # one body per letter
+
+# +90deg about X: (x,y,z) -> (x,-z,y).
+# sketch +Y -> world +Z (upright); extrude +Z -> world -Y (out the front face).
+m = adsk.core.Matrix3D.create()
+m.setToRotation(math.pi/2.0, adsk.core.Vector3D.create(1, 0, 0),
+                adsk.core.Point3D.create(0, 0, 0))
+m.translation = adsk.core.Vector3D.create(cx_cm, face_y_cm, cz_cm)  # applied AFTER the rotation
+mi = root.features.moveFeatures.createInput2(tools)
+mi.defineAsFreeMove(m)
+root.features.moveFeatures.add(mi)
+
+ci = root.features.combineFeatures.createInput(target_body, tools)
+ci.operation = adsk.fusion.FeatureOperations.JoinFeatureOperation
+root.features.combineFeatures.add(ci)
+```
+
+Two details that matter:
+
+- **Extrude 0.1mm deeper than the emboss you want and bury that 0.1 in the target.** Landing the tool body exactly coplanar with the target face asks Combine to join on coincident faces; overlap is more robust. Extrude 0.7 for a 0.6mm proud emboss, translate so the back sits 0.1mm inside.
+- **Assert the proud height** (`body.boundingBox.minPoint.y == face_y - 0.6`). It catches a sign error on the translation, which otherwise buries the text invisibly inside the part.
+
+Multi-line text produces **one body per letter**. Collect them all into the ObjectCollection or you will move some letters and leave the rest behind.
+
+## `adsk.doEvents()` returns before a parameter change finishes recomputing
+
+Setting `param.expression` then immediately reading `root.bRepBodies.count` (or a volume, or a bounding box) can return **mid-recompute state**. Observed: an assertion read `bodies=13` (11 letters + sculpture + base) right after a `body_t` change, on a design whose join was perfectly healthy. Re-querying the same doc a moment later returned `bodies=2`. Nothing was wrong with the model; the read was just early.
+
+This wastes real time, because the failure looks exactly like a genuine broken join and sends you diagnosing the wrong thing.
+
+`adsk.doEvents()` alone is not a barrier. Force the compute and settle:
+
+```python
+def settle(design, root, expected_bodies):
+    for _ in range(8):
+        design.computeAll()
+        adsk.doEvents()
+        if root.bRepBodies.count == expected_bodies:
+            return True
+    return False
+
+bt.expression = '10 mm'
+assert settle(design, root, 2), f"did not settle: bodies={root.bRepBodies.count}"
+```
+
+Only assert on geometry **after** it settles. If it never settles, the failure is real.
+
+## Suppress hard-won features, do not delete them
+
+When a design carries mutually exclusive variants (two logos on one face, two mount styles), the instinct is delete-and-rebuild per variant. Use `feature.isSuppressed = True` instead when the feature's *placement maths* was expensive to derive: two-pass SVG anchor probes, plane-flip cancellation, a rotation matrix onto a non-trivial face.
+
+```python
+feats = {f.name: f for f in root.features}
+feats['base_logo_extrude'].isSuppressed = (variant != 'logo')
+feats['base_text_join'].isSuppressed  = (variant != 'text')
+```
+
+Delete-and-rebuild means re-deriving that maths on every switch, and every re-derivation is a fresh chance to get it wrong. Suppression is reversible, survives the save, and keeps the timeline as documentation of both variants. Reserve deletion for geometry that is genuinely cheap to reconstruct from a few numbers.
+
+Caveat: suppression is per-feature, so suppress the **whole chain** for a variant (sketch extrude + move + combine), not just its last feature.
+
+## A parameter change that does not move the volume means the geometry did not move
+
+This is the detection rule for script-driven (as opposed to constraint-driven) geometry, and it is worth stating as a standalone check because the bug is silent in every other channel.
+
+When plan geometry is computed numerically in a build script, changing a user parameter updates the parameter and **nothing else**. The parameter table cheerfully reports the new value. Screenshots look plausible. Exports succeed. The only tell is that the volume does not move.
+
+Seen twice on the same design:
+
+1. `base_slot_w` reported 15.40mm while the slot stayed 10.4mm.
+2. A base exported with a volume **identical** at two different thicknesses (64,763.3 both), because the tab sockets never widened. That reached an exported STL.
+
+So, after any parameter change that should alter geometry:
+
+```python
+before = body.volume * 1000
+p.expression = '15 mm'
+settle(design, root, 2)
+after = body.volume * 1000
+assert abs(after - before) > 1.0, f"volume unchanged ({after:.1f}) -> geometry is not parametric here"
+```
+
+Two identical volumes across two parameter values is never a coincidence worth accepting. Rebuild the sketch at the new value.

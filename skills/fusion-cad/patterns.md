@@ -59,6 +59,21 @@ Internal units are cm. `ValueInput.createByString('30 mm')` accepts unit suffixe
 41. Internal travel-stop for a print-in-place slider
 42. Reorient a grounded jointed assembly for print/export
 43. Sketch constraint anti-patterns
+44. Print-in-place hinge via captive cone-tapered cylinder
+45. Two-part snap hinge with mating nub-in-cavity
+46. Sweep along path with horizontal lines as dimensional scaffolding
+47. Loft with guide rails via Intersect + Projection Link
+48. Chamfer a circular edge via Revolve-Cut (workaround)
+49. Modeled threads on Hole + Thread Offset for chamfer collision
+50. Fillet-before-Shell ordering rule
+51. Import SVG artwork and place it centred on a face
+51b. Embossed sketch text sized to fit a face
+52. Single-swap colour-change emboss (icon plane on top of a flat slab)
+53. Smooth offset band along a bezier centreline (fitted spline, not polyline)
+54. Detail-by-subtraction: draw detail as geometry, filter the profiles
+54b. Keyed tab + socket that survives a flat print
+55. Trace a silhouette from a screenshot (pixel table to mm)
+56. Variant matrix from one design: name the axes into the filename
 
 ## 1. Idempotent user-parameter add
 
@@ -328,10 +343,11 @@ body = design.rootComponent.bRepBodies.itemByName('main')
 em = design.exportManager
 opts = em.createSTLExportOptions(body, f'{out_dir}/part.stl')
 opts.meshRefinement = adsk.fusion.MeshRefinementSettings.MeshRefinementHigh
+opts.unitType = adsk.fusion.DistanceUnits.MillimeterDistanceUnits
 em.execute(opts)
 ```
 
-Refinement options: `MeshRefinementLow`, `MeshRefinementMedium`, `MeshRefinementHigh`. Only affects curved geometry; flat boxes produce identical files at any setting. Use `High` for production exports; the cost on flat-dominated geometry is zero, the benefit on curves is real.
+Refinement options: `MeshRefinementLow`, `MeshRefinementMedium`, `MeshRefinementHigh`. Only affects curved geometry; flat boxes produce identical files at any setting. Use `High` for production exports; the cost on flat-dominated geometry is zero, the benefit on curves is real. Set `unitType` explicitly so STL scale does not depend on document defaults; the API corpus lists `STLExportOptions.unitType` as a read/write `DistanceUnits` property.
 
 ### 14b. 3MF (color + multi-body capable)
 
@@ -980,6 +996,8 @@ Driving the joint (V11): `jointMotion` value props are read/write. `RevoluteJoin
 
 Constrain motion to the physically valid range.
 
+This uses the stable `JointLimits` object exposed from joint-motion classes (`SliderJointMotion.slideLimits`, `RevoluteJointMotion.rotationLimits`, etc.; API corpus says introduced July 2015). Do not confuse this with the newer preview `AssemblyConstraint` API.
+
 ```python
 lim = js.jointMotion.slideLimits          # rotationLimits for a revolute joint
 lim.isMinimumValueEnabled = True; lim.minimumValue = 0.0
@@ -1038,3 +1056,613 @@ Avoid these; each one produces a sketch the API reports as constrained while the
 - **`sketch.project()` on an in-plane construction axis.** `sketch.project(root.xConstructionAxis)` on an XY sketch returns an empty collection (the axis is already in-plane). Cannot use it to import a model axis as a symmetry reference; draw and dimension a construction line, or use the corner-anchor pattern.
 - **Symmetric constraints with manually-drawn axis lines.** Anchoring axis-line start points to origin and using `addSymmetry` leaves the axis lines' END points (their lengths) as free DOFs, so `isFullyConstrained` stays False. Adding length dims fixes it but buys nothing. Use section 2 instead.
 - **RectangularPattern with `isSymmetricInDirectionOne` for Join extrudes.** Produces wrong/disconnected bodies (gotchas.md). Use Mirror (section 33) or place instances manually.
+
+## 44. Print-in-place hinge via captive cone-tapered cylinder
+
+UNPROVEN by us (geometry only; the one print-in-place hinge we attempted fused, see gotchas G "print-in-place at tight clearances"). Recorded with source-video clearance recipe so a future attempt has a baseline.
+
+Mechanism: one continuous body containing two flanges joined by a captive cylindrical knuckle. The knuckle prints WITHOUT supports because the geometry leading up to it on the bed side is tapered at the printer's overhang limit (~55°), and the cap on the opposite side is a -35° tapered cone instead of a full overhang. Walls of the two flanges are separated from the cylinder/cone by Offset Face to create the running clearance.
+
+Source: What-Make-Art Fusion print-in-place hinge tutorial 2026-05-31. Recipe parameters reused verbatim where the speaker stated them with conviction:
+
+```python
+# Side-profile sketch on the side plane:
+# - Two 90 mm x 8 mm rectangles flanking the origin (the two hinge halves before joining).
+# - A vertical-tangent 16 mm circle centered above the origin (the knuckle).
+# - Two tangent lines from the rectangle top corners up to the circle at 55 degrees.
+#   The 55 degree value is the safe overhang for most FDM printers; the
+#   speaker hedged 40-60 deg based on printer. Tune per printer.
+overhang_deg   = 55      # adjust to printer (40 conservative, 60 aggressive)
+knuckle_dia    = 16      # mm; speaker emphasizes "make it big" for strength
+flange_len     = 90      # mm each side
+flange_height  = 8       # mm
+
+# Extrude flange-1 + circle + flange-2 ONE DIRECTION 15 mm. New Body.
+# Then re-show the sketch and extrude the LEFT flange face alone 30 mm. Join.
+# Result: one body with a stepped flange, ready for the cap.
+
+# Cap (cone) on top of the cylinder, opposite side:
+# Project the knuckle circle into a new sketch on the +X end face. Draw an
+# 8 mm center circle (knuckle_dia / 2 -- half the knuckle diameter is the rule).
+cap_dia        = 8       # = knuckle_dia / 2
+cap_extrude    = 4       # mm; "about half the diameter" per source
+cap_taper_deg  = -35     # negative taper makes a cone that prints without overhang
+# Extrude the 8 mm circle 4 mm with -35 degree taper, Join.
+
+# Now extrude the FULL side-profile sketch including the second flange,
+# 30 mm, NEW BODY. This gives a second body that the next step turns into
+# the other half of the hinge.
+
+# Combine: target = body 2, tool = body 1, operation = cut, Keep Tools = True.
+
+# Offset Face to add running clearance:
+#   On body 1, select ALL faces that will touch body 2's mating surfaces,
+#   set offset = -0.3 mm.  Then select the cone face, offset = -0.2 mm.
+#   (Cone tighter -> less play in the hinge.)
+#   Repeat the same offsets on body 2's mating faces.
+clear_flat = -0.3   # mm; flat-face running clearance
+clear_cone = -0.2   # mm; tighter cone clearance for less play
+
+# Mirror across the center plane joining both bodies into a 2-body unit
+# (Create > Mirror, operation = Join).
+
+# Fillets + chamfer for print quality:
+#   - Fillet every edge EXCEPT the bed-facing ones, at 0.8 mm (= 2x a 0.4 mm
+#     nozzle). 1.2 mm if you want it more rounded.
+#   - Chamfer the bottom face that contacts the build plate, 0.8 mm.
+fillet_r = 0.8     # = 2 x nozzle_dia (0.4 mm nozzle)
+chamfer_bed = 0.8
+
+# Final check: Inspect > Section Analysis on a face perpendicular to the
+# hinge axis. Slide the section plane through the part to confirm no walls
+# are touching anywhere along the axis.
+```
+
+Print-orientation rule (gotchas.md): the hinge axis MUST be parallel to the build plate. Laying the part with the hinge axis vertical turns the running-clearance gaps into horizontal layer planes that fuse on FDM. Section 42 covers reorienting a grounded jointed assembly for this.
+
+If your printer's overhang limit is unknown: print the geometry at 55deg first; if the underside of the cylinder shows sag/strings, lower to 50 or 45 and reprint. Don't go below 40deg without a reason -- below that the cylinder becomes structurally short and weak at the hinge axis.
+
+## 45. Two-part snap hinge with mating nub-in-cavity
+
+UNPROVEN by us. Recorded for the assembly-after-print case where the captive print-in-place approach (section 44) is undesirable (e.g., needs to disassemble, larger hinges where a captured cylinder would be too tall to print well, or the box geometry already has 2 separately printed halves).
+
+Mechanism: two SEPARATE printed bodies, each with a flange + cylindrical knuckle. One knuckle has a centered nub extruded out; the other has a matching cavity. The nub snaps into the cavity when the parts are pressed together, forming a pin joint that pivots.
+
+Source: Product Design Online Day 20 (2026-06-01 transcript, 9-minute tutorial). Recipe:
+
+```python
+# Two box halves placed side-by-side via JOINT (not Move).
+# Joint Offset sized to the hinge: 4.5 mm flange + 8 mm knuckle dia
+# leaves 0.5 mm gap on each side within a 9 mm offset.
+joint_offset      = 9     # mm; preserved across box parameter changes
+flange_len        = 4.5   # mm; line from top corner outward on the side-face sketch
+knuckle_dia       = 8     # mm; circle centered on end of flange line
+flange_depth      = 5     # mm; extrude depth of the side-profile flange body
+side_gap          = 0.5   # mm; derived: (joint_offset - flange_len - knuckle_dia/2) per side
+
+# OUTER hinge (built into box-bottom component):
+# 1. Sketch on outer side face: 4.5 mm horizontal line from top corner;
+#    8 mm center circle on line end; tangent angled line from bottom corner.
+# 2. Extrude the two profiles 5 mm one direction, New Body (so Mirror works).
+# 3. New sketch on the inner face of the outer hinge. Project the outer
+#    circle line with Projection Link CHECKED.
+# 4. Center circle 4 mm on the PROJECTED center point.
+nub_dia           = 4     # mm
+nub_depth         = 3.8   # mm; <5 so it does not protrude past inner flange
+nub_taper_deg     = -12   # source range: -10 to -14; speaker hedged
+nub_edge_fillet   = 1     # mm; prevents the nub from binding inside the cavity
+# 5. Extrude the 4 mm circle 3.8 mm, taper -12 deg, Join.
+# 6. Fillet the nub's outer edge 1 mm.
+
+# INNER hinge (built into box-top component):
+# 7. New sketch on the box-top side facing the outer hinge. Project the
+#    hinge profile edge.
+# 8. Center circle starting from the PROJECTED point only (no diameter dim
+#    so the inner circle inherits from the outer; this is what makes the
+#    inner sketch parametric).
+# 9. Horizontal line connecting circle to box; tangent angled line from
+#    lower box corner; project the existing lower box edge to close the
+#    profile.
+inner_clear       = 0.6   # mm; Offset Start clearance between mating flanges
+# 10. Extrude with Start = Offset(0.6 mm), Distance = 5 mm, New Body.
+
+# CAVITY: cut the nub shape out of the inner hinge.
+# 11. Combine: Target = inner hinge body; Tool = outer hinge body (which
+#     carries the nub); Operation = Cut; Keep Tools = True.
+
+# RUNNING CLEARANCE: Offset Face on cavity walls.
+# Offset Face is per-face, applied to ALL selected faces simultaneously.
+# Selecting both opposing walls of a cylindrical cavity and offsetting
+# negative 0.4 mm widens the cavity by 0.4 mm on each side = 0.8 mm
+# diametric clearance.
+cavity_offset    = -0.4   # mm; per-face. Doubles to 0.8 mm diametric.
+starting_clear   = 0.8    # mm; diametric. Speaker: start at 0.8, work smaller.
+# Range the speaker gives is 0.2-0.8 mm, hedged on slicer/printer.
+
+# Mirror each hinge body across a midplane construction plane to make the
+# matching hinge on the opposite side of the box pair.
+# - Activate top-level component.
+# - Construct > Midplane on the two outer faces of the box.
+# - Create > Mirror (Solid tab, NOT Sketch tab) one body at a time so
+#   each mirrored body ends up in the correct component.
+
+# Optionally combine each hinge body with its parent box component body.
+# Export as STL per component.
+layer_h         = 0.1   # mm; speaker's recommended layer height for the print
+```
+
+Where the speaker's "parametric adaptability" claim is true vs not, per the Day 20 transcript review:
+- Inner hinge sketch (steps 7-10): genuinely parametric. Uses only projected geometry and constraints, scales with the outer hinge.
+- Outer hinge sketch (steps 1-2): explicit 4.5 mm flange line and 8 mm circle dimensions. Does NOT scale if box width/height parameters change. If your box dims will change, expose `flange_len` and `knuckle_dia` as user parameters and reference them from the sketch dims so the outer profile tracks.
+
+Print-orientation: the box should lie with the lid face down (build plate down), exposing the hinge profile to print without supports. Layer height 0.1 mm per source.
+
+Print test plan: start at `starting_clear = 0.8 mm`. If too loose (lid wobbles), reduce by 0.1 and reprint until the joint is tight but still pivots. If too tight on first print, increase the `nub_taper_deg` magnitude (toward -14) or reduce `nub_dia` by 0.1.
+
+## 46. Sweep along path with horizontal lines as dimensional scaffolding
+
+UNPROVEN by us. Source: Product Design Online "Day 3 / Paperclip" tutorial (2026-06-01 transcript).
+
+Pattern: when a sweep path has multiple straight-vertical segments separated by horizontal offsets, sketch the horizontal segments as REGULAR lines first so you can dimension their widths quickly, then convert them to CONSTRUCTION lines so the Sweep ignores them. Replace each construction segment with a Tangent Arc that connects the two adjacent vertical lines smoothly. This avoids the "guide rail isn't tangent" headache and lets you dimension the path's width without separate point-to-point dim chains.
+
+```python
+# Sketch on top origin plane (paperclip example values):
+# Vertical line from origin: 16.25 mm
+# Horizontal line: 7.5 mm   <- will become construction
+# Vertical line down:       26.25 mm
+# Horizontal line: -6.5 mm  <- will become construction
+# Vertical line down:       19.25 mm
+# Horizontal line:  5.5 mm  <- will become construction
+# Vertical line down:        9.25 mm
+
+# After sketching, multi-select the 3 horizontal lines and toggle "Construction"
+# in the Sketch Palette (or set isConstruction = True on each SketchLine via API).
+# The line geometry survives for the Tangent Arc snap points; it just no longer
+# participates in any feature that consumes the sketch's profiles or wires.
+
+for h_line in horizontal_lines:
+    h_line.isConstruction = True
+
+# Now add Tangent Arcs across each construction-line endpoint pair. Fusion's
+# Tangent Arc tool auto-applies tangent constraints at each junction; that's
+# the geometry that makes the Sweep follow smoothly without a kink.
+```
+
+Why it matters for an MCP agent: building a sweep path from script-level coordinates without this pattern produces either (a) sharp corners that the Sweep refuses, or (b) a single curved spline that's hard to dimension. The construction-line scaffolding gives you both: each width is a single linear dim, and the corners are guaranteed tangent because they were placed by the Tangent Arc tool, not free-handed.
+
+Convention: name the construction lines (e.g. `width_top`, `width_mid`, `width_bot`) so when you re-edit the sketch later the dimensions stay anchored to identifiable entities.
+
+## 47. Loft with guide rails via Intersect + Projection Link
+
+UNPROVEN by us. Source: PDO Day 4 glass-bottle Loft tutorial. The single most useful Loft technique in the corpus.
+
+Pattern: when a Loft uses guide rails, the rails MUST touch every profile or Fusion raises "the guide rail isn't touching all sketch profiles." The reliable way to guarantee this is to sketch the rails on a plane that bisects the profiles (the XZ origin plane for centered profiles), then use the Intersect command (Sketch tab > Create > Project/Include > Intersect) with **Projection Link checked** to snap rail points onto the live profile edges. The intersected geometry appears in purple and updates parametrically if any source profile changes size.
+
+```python
+# After sketching 4 profile sketches (e.g. 2 filleted rectangles + 2 circles
+# at offset planes), sketch the guide rails on the perpendicular bisector
+# plane (XZ origin plane if profiles are centered on origin):
+
+rail_sketch = root.sketches.add(root.xZConstructionPlane)
+rail_sketch.name = "guide_rail_left"
+
+# In the UI: hover each of the 4 profile sketches on the LEFT side; the red
+# "intersect dot" appears; click to add. Repeat for all 4 profiles. Check
+# Projection Link in the dialog. The script equivalent is to call
+# sketch.intersect(entities) for each profile sketch.
+
+# Build the rail itself from the now-projected points:
+# - For straight segments (typically the upper portion near the stem):
+#   draw a Line connecting the top two intersected points.
+# - For curved segments (the bottle body curvature):
+#   draw a Fit Point Spline through the bottom three intersected points.
+
+# CRITICAL: snap the spline's top handle onto the line so the junction is G1.
+# In the UI this is "click and drag the top spline handle until it snaps to
+# the straight line." API equivalent is addCoincident between the spline's
+# top control point's tangent direction and the line.
+
+# Mirror the rail across the sketch's vertical axis (centered profiles let
+# you use the axis directly with no extra construction geometry).
+
+# Finally re-activate Loft; in the dialog, select the 4 profiles in
+# bottom-to-top order (Loft IS ORDER-SENSITIVE), then click into the Rails
+# field and pick the spline+line as one rail and the mirrored copy as the
+# other.
+```
+
+Two failure modes the source video explicitly calls out:
+1. **"Guide rail isn't touching all sketch profiles"** — caused by free-handed rail points that look on a profile edge but aren't. Fix: always use Intersect, never eyeball.
+2. **Discontinuity at the spline-line junction** — Loft may treat them as separate rails or produce a kink. Fix: explicitly snap the spline's top handle to the line so the junction is G1 (tangent-continuous).
+
+The geometric-continuity test was added as a follow-up Underspecified entry in the Day 4 dive: the source video doesn't say whether the snap achieves G1 (tangent) or only G0 (positional). In practice the snap appears to do G1 because Fusion shows the spline-line tangent constraint after snapping. If the Loft produces a visible kink anyway, manually add a tangent constraint between the spline's top control direction and the line.
+
+## 48. Chamfer a circular edge via Revolve-Cut (workaround)
+
+UNPROVEN by us. Source: PDO Day 6 hex-nut tutorial. Speaker says verbatim *"Chamfer does not currently work in a circular manner"* — this is a documented Fusion limitation as of 2023 video date, and the Revolve-Cut workaround is the accepted alternative.
+
+The Chamfer feature in Fusion is designed for STRAIGHT-EDGE chamfers (rectangular box edges, polygon corners). When the target edge is circular (e.g., the OD of a cylinder, the chamfer ring on a hex nut where the top face transitions to the side faces), the Chamfer feature either refuses or produces wrong geometry. Substitute a Revolve-Cut driven by a small triangle profile:
+
+```python
+# 1. Sketch a triangle on a plane that contains the rotation axis (typically
+#    XZ if the body's rotation axis is Z). Project the corner point of the
+#    body you want to chamfer so the triangle's apex snaps to it precisely.
+chamfer_height = 1.5   # mm; how tall the chamfer is along the axis
+# Equal constraint on the two non-vertical legs -> isosceles right triangle,
+# giving a 45-degree chamfer. Vertical leg = chamfer_height.
+
+# 2. Revolve the triangle around the body's rotation axis (Z), 360 degrees.
+#    Fusion auto-detects the existing body and switches Operation to Cut.
+revolves = root.features.revolveFeatures
+ri = revolves.createInput(triangle_profile, root.zConstructionAxis,
+                          adsk.fusion.FeatureOperations.CutFeatureOperation)
+ri.setAngleExtent(False, adsk.core.ValueInput.createByString("360 deg"))
+revolves.add(ri)
+```
+
+Combine with Mirror-by-FACES (NOT Mirror-by-Features) when the chamfer needs to appear on both ends of the body:
+
+```python
+# Build a Midplane construction plane from the two outer faces of the body,
+# then activate Mirror with Object Type = Faces:
+mirror_input = root.features.mirrorFeatures.createInput(
+    chamfer_face_collection,        # ObjectCollection of BRepFaces
+    midplane_construction_plane)
+root.features.mirrorFeatures.add(mirror_input)
+```
+
+Mirror-by-Faces lets you pick the specific chamfer faces from the body, not the original Revolve-Cut feature itself. This is correct when you want only the chamfer geometry mirrored (not the triangle sketch). Pattern N33 covers Mirror-by-Features for symmetric extrude duplication; this entry exists separately because mirroring a Revolve-Cut feature directly is awkward (the source feature already wraps 360 degrees; mirroring the feature produces overlapping geometry).
+
+Open question whether Fusion has fixed the Chamfer-on-circular-edges limitation since the 2023 source video. Re-test with the Chamfer tool on a circular edge before committing to the workaround for new designs. If Chamfer now works, prefer it; this entry then becomes a fallback for legacy compatibility.
+
+## 49. Modeled threads on Hole + Thread Offset for chamfer collision
+
+UNPROVEN by us. Source: PDO Day 6 hex-nut tutorial.
+
+Two distinct lessons in one Hole-feature workflow:
+
+**Modeled vs cosmetic threads.** Fusion's Hole feature defaults to a "cosmetic" thread, which is a texture map shown in the viewport but absent from the 3D body and excluded from STL / STEP export. To get a thread that affects geometry (for 3D printing, FEA, or downstream CAM), you MUST check the **Modeled** checkbox. Per the source: *"You must check the 'Modeled' option if you would like this thread to affect the actual 3D body. Otherwise, Fusion 360 threads will default to being represented by a static image that will not affect the model upon exporting. This is to help with latency on large files that may contain hundreds of threads."*
+
+```python
+# Hole feature input with modeled thread.
+hi = root.features.holeFeatures.createSimpleInput(
+    adsk.core.ValueInput.createByString("12 mm"))   # nominal drill diameter
+hi.setAllExtent(adsk.fusion.ExtentDirections.PositiveExtentDirection)
+hi.threadInfo = adsk.fusion.HoleThreadInfo.create(
+    adsk.fusion.ThreadLocations.SidesThreadLocation,
+    "GB Metric profile",          # thread standard family
+    "M12x1",                       # thread designation
+    "12 mm",                       # nominal size
+)
+hi.isModeled = True                # critical: produce actual geometry
+root.features.holeFeatures.add(hi)
+```
+
+**Thread Offset for chamfer collision.** When a hex nut (or similar threaded part) has chamfers on both faces AND a tapped hole running through, the thread cylinder geometrically intersects the chamfer cone on whichever side the chamfer is. The fix is to shorten the thread so it doesn't reach the chamfer:
+
+```python
+# After the initial Hole feature, edit it (or set on creation):
+hi.threadOffset = adsk.core.ValueInput.createByString("8.5 mm")
+```
+
+The 8.5mm value in the source is derived from the specific hex-nut geometry (10mm extrude depth + 1.5mm chamfer height per side). For a script-driven part, compute the offset parametrically:
+
+```python
+thread_offset_expr = "extrude_depth - chamfer_height - thread_clearance"
+# e.g., 10 - 1.5 - 0 = 8.5 mm in the source's geometry
+```
+
+Practical note: Fusion's parametric edit-back makes this a one-shot followup. Modify the Hole feature after observing the collision; the thread shortens, the Hole otherwise stays intact, no need to rebuild.
+
+## 50. Fillet-before-Shell ordering rule
+
+Codified from PDO Day 2 (glass bottle) and PDO Day 4 (glass bottle Loft). Both videos call this out independently as a critical ordering rule.
+
+Rule: when a body will be Shelled, apply any Modeling Fillets to the OUTSIDE of the body BEFORE running the Shell command. Shell traces the existing contour to compute the inner wall offset, so a fillet that exists at Shell-time produces a smooth uniform-thickness wall around the rounded edge. A fillet applied AFTER Shell does not propagate to the inner surface — the inner surface stays sharp where the outer is rounded, the wall thickness becomes non-uniform near the fillet, and in pathological cases Shell silently fails.
+
+```python
+# Correct order:
+# 1. Build solid body (extrude / revolve / loft / sweep).
+body = build_main_body()
+
+# 2. Apply outer-edge fillets.
+fillets = root.features.filletFeatures
+edge_collection = adsk.core.ObjectCollection.create()
+edge_collection.add(body_lower_edge)
+fi = fillets.createInput()
+fi.addConstantRadiusEdgeSet(edge_collection,
+    adsk.core.ValueInput.createByString("5 mm"), True)
+fillets.add(fi)
+
+# 3. THEN Shell.
+shell_input = root.features.shellFeatures.createInput(
+    body_open_face_collection,        # the open face(s)
+    False)                            # isTangentChain
+shell_input.insideThickness = adsk.core.ValueInput.createByString("2 mm")
+root.features.shellFeatures.add(shell_input)
+```
+
+Equivalent rule for sketch fillets in Loft / Sweep profiles: apply Sketch Fillets to the profile sketches BEFORE building the Loft/Sweep. The Loft consumes the sketch with whatever profile is closed at the time; if you fillet the sketch later, the Loft may or may not pick up the change depending on the timeline.
+
+Verified-by-source quote (Day 2): *"It's important to note that we're adding the Fillet before we make the bottle hollow, as the Shell command will trace the inside of the object."*
+
+Verified-by-source quote (Day 4): *"Similar to the soda bottle on day number two, we need to apply this fillet before we go to hollow out the body, as the shell command will follow this contour."*
+
+Two independent corroborations from a careful source on the same point is enough to codify this without our own print verification. (The rule is also widely repeated in Fusion training material outside this corpus.)
+
+Corollary: if you discover after Shell that you forgot a fillet, the cheapest fix is to delete the Shell from the timeline, add the fillet, and re-add the Shell. Edits compound; rolling back one feature is usually faster than fighting a half-correct geometry.
+
+## 51. Import SVG artwork and place it centred on a face
+
+Brand logos and any artwork too complex to draw from primitives. See gotchas: imported curves are FIXED (`sketch.move()` is a silent no-op), and holes arrive as separate profiles.
+
+Two-step: measure the native size once with a throwaway import, then place for real.
+
+```python
+SVG = 'C:/abs/path/logo.svg'
+TARGET_W = 44.0                  # mm, final width on the face
+TARGET_CX, TARGET_CY = 0.0, 0.0  # mm, where to centre it
+
+# --- step 1: measure native size at scale 1.0 (throwaway) ---
+probe = root.sketches.add(root.xYConstructionPlane)
+probe.importSVG(SVG, 0, 0, 1.0)
+xs, ys = [], []
+for c in probe.sketchCurves:
+    b = c.boundingBox
+    xs += [b.minPoint.x, b.maxPoint.x]
+    ys += [b.minPoint.y, b.maxPoint.y]
+native_w, native_h = (max(xs)-min(xs))*10, (max(ys)-min(ys))*10   # mm
+probe.deleteMe()
+
+# --- step 2: place at import time (anchor = top-left, extends +X / -Y) ---
+s = TARGET_W / native_w
+w, h = native_w * s, native_h * s
+ax_cm = (TARGET_CX - w/2.0) / 10.0
+ay_cm = (TARGET_CY + h/2.0) / 10.0
+
+sk = root.sketches.add(plane)
+sk.name = 'icon_logo'
+assert sk.importSVG(SVG, ax_cm, ay_cm, s), "importSVG failed"
+
+# --- step 3: verify it lands inside the host face BEFORE extruding ---
+xs, ys = [], []
+for c in sk.sketchCurves:
+    b = c.boundingBox
+    xs += [b.minPoint.x, b.maxPoint.x]
+    ys += [b.minPoint.y, b.maxPoint.y]
+print(f"bbox X {min(xs)*10:.2f}..{max(xs)*10:.2f}  Y {min(ys)*10:.2f}..{max(ys)*10:.2f}")
+assert min(xs)*10 > FACE_X_MIN and max(xs)*10 < FACE_X_MAX, "artwork overruns face in X"
+assert min(ys)*10 > FACE_Y_MIN and max(ys)*10 < FACE_Y_MAX, "artwork overruns face in Y"
+
+# --- step 4: keep solids, drop holes ---
+thresh = 100.0 * s * s           # mm^2; tune per asset, print the split to check
+keep = adsk.core.ObjectCollection.create()
+for i in range(sk.profiles.count):
+    pr = sk.profiles.item(i)
+    area = pr.areaProperties(
+        adsk.fusion.CalculationAccuracy.LowCalculationAccuracy).area * 100.0
+    if pr.profileLoops.count > 1 or area > thresh:
+        keep.add(pr)
+        print(f"  keep [{i}] loops={pr.profileLoops.count} area={area:.2f}")
+    else:
+        print(f"  HOLE [{i}] loops={pr.profileLoops.count} area={area:.2f}")
+
+exts = root.features.extrudeFeatures
+ei = exts.createInput(keep, adsk.fusion.FeatureOperations.JoinFeatureOperation)
+ei.setDistanceExtent(False, adsk.core.ValueInput.createByString('icon_t'))
+exts.add(ei).name = 'icon_logo_extrude'
+
+assert root.bRepBodies.count == 1, f"floating bodies: {root.bRepBodies.count} (artwork off-face?)"
+```
+
+## 51b. Embossed sketch text sized to fit a face
+
+Extrude the **SketchText object itself**, not `sketch.profiles` — Fusion preserves letter counters (a, o, e) automatically, so none of the SVG hole-filtering applies.
+
+```python
+sk = root.sketches.add(plane)
+sk.name = 'agent_text'
+ti = sk.sketchTexts.createInput2('automate it', cm(7.0))     # height in cm
+ti.fontName = 'Arial'
+ti.textStyle = adsk.fusion.TextStyles.TextStyleBold
+ti.setAsMultiLine(
+    P(cm(-29.5), cm(-11.0), 0), P(cm(29.5), cm(11.0), 0),    # the wrap box
+    adsk.core.HorizontalAlignments.CenterHorizontalAlignment,
+    adsk.core.VerticalAlignments.MiddleVerticalAlignment, 0)
+st = sk.sketchTexts.add(ti)
+
+ei = exts.createInput(st, adsk.fusion.FeatureOperations.JoinFeatureOperation)   # <- st, not a profile
+ei.setDistanceExtent(False, adsk.core.ValueInput.createByString('icon_t'))
+exts.add(ei).name = 'agent_text_extrude'
+```
+
+**Always probe the height; never assume it.** Font metrics are unknowable in advance, and `setAsMultiLine` silently **wraps** rather than erroring, which shows up as a bbox far taller than the requested height:
+
+```python
+for h_mm in (7.0, 7.5, 8.0):
+    sk = root.sketches.add(plane); sk.name = '_fit'
+    ...
+    st = sk.sketchTexts.add(ti)
+    bb = st.boundingBox
+    w, ht = (bb.maxPoint.x-bb.minPoint.x)*10, (bb.maxPoint.y-bb.minPoint.y)*10
+    print(f"h={h_mm} -> {w:.2f} x {ht:.2f}  {'WRAPPED' if ht > h_mm*1.5 else 'single line'}")
+    sk.deleteMe()
+```
+
+Real data, "automate it" in Arial Bold on a 60mm face: 7.0mm -> 51.69mm wide (fits, 4.15mm margins); 7.5mm -> 55.39mm (2.31mm); 8.0mm -> 59.08mm (0.46mm, unusable). Widen the wrap box past the expected string width or the wrap masks the real fit.
+
+## 52. Single-swap colour-change emboss (icon plane on top of a flat slab)
+
+For an FDM piece where embossed artwork must print in a second colour with **no manual paint step** in the slicer. The trick is geometric, not a slicer setting: if nothing whatsoever exists above the slab's top face except the artwork, then every layer above that height is pure artwork, so one filament change at that Z colours all of it.
+
+```python
+# icon_plane tracks body_t automatically, so thickness variants need no rework
+pi = root.constructionPlanes.createInput()
+pi.setByOffset(root.xYConstructionPlane, adsk.core.ValueInput.createByString('body_t'))
+icon_plane = root.constructionPlanes.add(pi)
+icon_plane.name = 'icon_plane'
+
+# every icon sketch goes on icon_plane and extrudes 'icon_t' Join
+```
+
+Rules that make it work:
+
+- **Nothing else above `body_t`.** One stray feature poking above the slab breaks the guarantee.
+- **Land `body_t` on a layer boundary.** 10mm and 15mm are both exact at 0.2mm layers (layer 50 / 75). A `body_t` of e.g. 10.1mm forces the swap mid-layer.
+- **Make `icon_t` a whole number of layers.** 0.6mm = 3 layers at 0.2mm.
+- Per-icon *different* colours still need manual painting; this pattern buys one swap for all artwork at once.
+
+## 53. Smooth offset band along a bezier centreline (fitted spline, not polyline)
+
+For ribbon/connector geometry following a curve. Sampling the centreline and offsetting into a many-segment polyline "works" but leaves visible facets on the extruded side walls (~1mm facets at 48 segments). Fitted splines through far fewer points give smooth walls, and the volume comes out unchanged, which is the proof the swap did not distort the geometry.
+
+```python
+import math
+
+def bez(p0, p1, p2, p3, t):
+    u = 1.0 - t
+    return (u*u*u*p0[0] + 3*u*u*t*p1[0] + 3*u*t*t*p2[0] + t*t*t*p3[0],
+            u*u*u*p0[1] + 3*u*u*t*p1[1] + 3*u*t*t*p2[1] + t*t*t*p3[1])
+
+def bez_d(p0, p1, p2, p3, t):        # analytic tangent; do NOT finite-difference
+    u = 1.0 - t
+    return (3*u*u*(p1[0]-p0[0]) + 6*u*t*(p2[0]-p1[0]) + 3*t*t*(p3[0]-p2[0]),
+            3*u*u*(p1[1]-p0[1]) + 6*u*t*(p2[1]-p1[1]) + 3*t*t*(p3[1]-p2[1]))
+
+P = adsk.core.Point3D.create
+W = 0.15        # HALF width, cm
+N = 12          # 13 points is plenty for a spline; 48 was overkill as a polyline
+
+left, right = [], []
+for i in range(N + 1):
+    t = i / float(N)
+    px, py = bez(p0, p1, p2, p3, t)
+    tx, ty = bez_d(p0, p1, p2, p3, t)
+    m = math.hypot(tx, ty)
+    nx, ny = ty/m, -tx/m                      # unit normal
+    left.append(P(px + nx*W, py + ny*W, 0))
+    right.append(P(px - nx*W, py - ny*W, 0))
+
+lc = adsk.core.ObjectCollection.create()
+for pt in left: lc.add(pt)
+rc = adsk.core.ObjectCollection.create()
+for pt in right: rc.add(pt)
+sk.sketchCurves.sketchFittedSplines.add(lc)
+sk.sketchCurves.sketchFittedSplines.add(rc)
+sk.sketchCurves.sketchLines.addByTwoPoints(left[0], right[0])      # end caps
+sk.sketchCurves.sketchLines.addByTwoPoints(left[N], right[N])
+```
+
+Bury each end ~2mm inside the bodies it connects, so the Join is solidly manifold rather than a coincident-face touch.
+
+## 54. Detail-by-subtraction: draw detail as geometry, filter the profiles
+
+Cheap way to get icon detail (robot eyes, an envelope flap line, a grille) without a second cut feature. Draw the detail shapes *inside* the outline in the same sketch; Fusion emits the outline-minus-details as one profile and each detail as its own. Extrude only what you want.
+
+```python
+def biggest(sk):
+    best, ba = None, -1
+    for i in range(sk.profiles.count):
+        pr = sk.profiles.item(i)
+        a = pr.areaProperties(adsk.fusion.CalculationAccuracy.LowCalculationAccuracy).area
+        if a > ba:
+            best, ba = pr, a
+    c = adsk.core.ObjectCollection.create()
+    c.add(best)
+    return c, ba * 100.0     # mm^2
+```
+
+Variants:
+
+- **Holes** (eyes, mouth): keep only the largest profile; the detail profiles are the holes.
+- **Groove / engraved line** (envelope flap, seam): draw the detail as a thin closed *band*, then keep everything EXCEPT the band (sort by area, drop the smallest). A removed wedge cuts the outline open and reads wrong; a band leaves the outline intact and reads as an engraved line.
+- Keep grooves at least ~1.0mm **perpendicular** width. A V-band of 1.5mm *vertical* thickness at 46 degrees is only 1.04mm perpendicular. Compute the real width, do not eyeball the sketch.
+- To close a region using an existing edge, do **not** redraw that edge. Put your new curve endpoints exactly on its endpoints and reuse it. Duplicate coincident lines create slivers.
+
+Always print every profile area before choosing; the split is asset-specific.
+
+## 54b. Keyed tab + socket that survives a flat print
+
+A locating key for a part that drops into a base. Beats a plain slot: a round or tangent edge in a straight slot is line contact and rocks; a rectangular tab cannot rotate.
+
+Four constraints that all have to hold at once, and they fight each other:
+
+1. **Weld.** The tab must root into real material, not a thin tangent. Bury it into the host and check the host is wider than the tab at the joint:
+
+```python
+dy = abs(tab_top_y - circle_cy)
+half_chord = math.sqrt(R**2 - dy**2)
+assert half_chord > tab_w/2, "tab is wider than its host at the joint"
+```
+
+2. **Visible face.** Inset the tab from the face that shows, so the host's outline stays clean.
+3. **Printability.** Inset from ONE face only; keep it flush with the plate or it becomes an unsupported island (see gotchas). `tab_t = body_t - tab_inset`, extruded from Z=0.
+4. **Seating.** Make the socket DEEPER than the tab is long, so the tab does not bottom out and the host's own edge takes the load:
+
+```python
+base_socket_d = tab_exp + 0.6        # 0.6mm of daylight under the tab tip
+```
+
+Socket plan size is `(tab_w + clear) x (tab_t + clear)`, and its centre shifts by `tab_inset/2` to keep the part centred in its mate (see gotchas).
+
+```python
+socket_cy = BASE_CY + tab_inset/2.0
+part_back  = socket_cy + (tab_t + clear)/2.0 - clear/2.0
+part_front = part_back - body_t
+assert abs((part_front + part_back)/2.0 - BASE_CY) < 0.2
+```
+
+`clear` 0.3mm total (0.15/side) is a friction fit for FDM. Assert the mating volumes differ across thickness variants, or you will ship a socket that silently never tracked its parameter.
+
+Note on poka-yoke: evenly spaced identical tabs will also seat rotated 180 degrees. If that matters, make one tab a different width; if the wrong orientation is obvious on sight, don't bother.
+
+## 55. Trace a silhouette from a screenshot (pixel table to mm)
+
+For sculptures or replicas of a screen UI. Pick ONE dimension as the driver, derive a px-to-mm scale, and express every coordinate through it. The screenshot's zoom level then cancels out entirely, so it does not matter what zoom the source image was captured at.
+
+```python
+S = 60.0 / 236.0          # DRIVER: known real size / its measured pixel width
+CX, CY = 928.0, 506.0     # px of the feature you're treating as the origin
+
+def X(pxx): return (pxx - CX) * S / 10.0   # cm, +X right
+def Y(pxy): return (CY - pxy) * S / 10.0   # cm, +Y up (screen Y is inverted)
+def L(pxl): return pxl * S / 10.0          # cm, a length
+```
+
+Verify by asserting the driver: the bounding box of the driver feature must come back at exactly the intended size (`X -30.00..30.00` for a 60mm driver). If it does, every other dimension is right by construction.
+
+Honest limitation to disclose, not hide: this puts the layout in the *script*, not in sketch constraints. The extrudes stay parametric, but changing the driver parameter alone will NOT rescale the plan geometry; that needs a script re-run. Say so in the SKU README rather than implying the model is fully parametric.
+
+## 56. Variant matrix from one design: name the axes into the filename
+
+When a design grows mutually exclusive treatments (two face arts, two mount styles, two thicknesses), the export set multiplies. The failure mode is not the geometry, it is the **naming**.
+
+The specific way it goes wrong: a design starts with one treatment, exports as `<SKU>-<mount>-t<n>`, then gains a second treatment. Re-exporting over the same filenames silently destroys the first treatment's files. The name had no room to say which treatment it held, so the second one just took its place. If the design also does not archive, those files are gone.
+
+Rule: **the moment a design gains a second value on any axis, that axis belongs in the filename** — including for the files that already exist. Rename the originals rather than leaving them ambiguous.
+
+```
+<part>-<mount>-<face>-t<thickness>      # every axis explicit
+bracket-stand-logo-t10
+bracket-magnet-text-t10
+```
+
+Build the matrix with the expensive axis outermost, so the costly feature is built once per value rather than once per file:
+
+```python
+for face in ('n8n', 'automate'):      # outermost: rebuilding this is expensive
+    set_face(root, plane, face)
+    for mount in ('stand', 'magnet'):
+        set_mount(root, mount)
+        for t in THICKNESSES:
+            bt.expression = f'{t} mm'
+            assert settle(design, root, 2)
+            assert_variant_invariants(sculpt(root), mount, t)   # per-variant, before export
+            dump(em, sculpt(root), f'{SKU}-{mount}-{face}-t{t}')
+```
+
+Assert per-variant invariants **inside** the loop, not once at the end. Cheap ones that catch real mistakes: the Y-min that distinguishes the mounts, `Zmax == body_t + icon_t`, the X span. A variant that silently exported with the wrong mount's geometry is otherwise indistinguishable from a correct file until someone prints it.
+
+Also disclose which axes are **not** visible in the bounding box. Two face treatments occupy the same face, so nothing in the geometry summary tells them apart. Record a discriminator in the SKU README (triangle count works: an imported-SVG logo carried 4,316 tris against a text treatment's 3,886) so a future reader can identify a stray file without opening CAD.
+
+Finally: when an axis collapses (a thickness gets dropped), archive the retired files **with a README explaining why**, and check whether any of them were wrong. A dropped axis is the best moment to notice that its files never worked; see the volume-diff rule in `gotchas.md`.

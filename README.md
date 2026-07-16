@@ -17,8 +17,8 @@ A Claude Code plugin for driving the [Autodesk Fusion 360 MCP](https://www.autod
 - Undo and redo with documented atomicity behavior
 - Explicit camera fit-view from script for deterministic screenshots, plus viewport-to-PNG
 - Bounding-box and volume verification, partial-height interior features, targeted delete-and-rebuild
-- `apiDocumentation` lookup pattern for unfamiliar signatures
-- 43 copy-ready patterns and a catalog of 39 failure modes with reproductions and fixes
+- `apiDocumentation` lookup pattern for unfamiliar signatures, plus Preview API safety guidance from the local Fusion API corpus
+- 56 copy-ready patterns and a catalog of 62 failure modes with reproductions and fixes
 
 ## Requirements
 
@@ -73,8 +73,8 @@ fusion360-mcp/
 ├── skills/
 │   └── fusion-cad/
 │       ├── SKILL.md        trigger surface + decision rules + top gotchas
-│       ├── patterns.md     43 copy-ready Python snippets
-│       └── gotchas.md      39 documented failure modes and fixes
+│       ├── patterns.md     56 copy-ready Python snippets
+│       └── gotchas.md      62 documented failure modes and fixes
 ├── LICENSE
 └── README.md
 ```
