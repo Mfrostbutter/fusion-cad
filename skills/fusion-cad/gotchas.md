@@ -541,6 +541,32 @@ PRINTER-VERIFIED on a captured slider+hinge test part: a print-in-place slider p
 
 IF you do commit to a print-in-place hinge, keep its axis HORIZONTAL / parallel to the build plate so the knuckle-separation gaps print as vertical seams (reliably free). Laying the part so the hinge axis is VERTICAL turns those gaps into horizontal layer planes that fuse easily, giving a stiff or welded pivot. Same family as the "flange overhangs need slicer tree supports" note above.
 
+### PRINTER-VERIFIED: keyed tab into a socket, PLA
+
+Our own two-print result, so this one is not a tutorial recipe.
+
+| Fit | Tab | Socket | Total clearance | Result |
+|---|---|---|---|---|
+| tab in socket, display stand | 8 x 6 mm rectangular | 8.3 x 6.3 | **0.3 mm** | seats, but "very tight" |
+| same | 8 x 6 mm | 8.4 x 6.4 | **0.4 mm** | "works great, fitment is much better" |
+
+PLA on a Bambu P1S, printed flat, socket opening upward. 0.4mm total (0.2/side) is a friction fit that still holds a display piece upright without wobble. That matches the usual FDM bands: **0.2-0.4mm total for a snug/friction fit, ~0.5mm+ before it slides freely.** Start at 0.4 rather than 0.3 for this class of fit.
+
+Clearance is **absolute, not proportional**: it does not scale with the part. But engagement *length* does, and a longer tab has more surface to bind, so the same 0.4mm is effectively tighter on a 14mm tab than on an 8mm one. When scaling a design up, hold clearance and expect it to feel tighter, not looser.
+
+### A fit validated on your own printer is not validated
+
+This is the trap behind every clearance number above, and it is a judgement error rather than a CAD one.
+
+If the model is going to a marketplace (MakerWorld, Printables, Thingiverse), strangers print it on machines you do not control. FDM tolerance varies by roughly **±0.1-0.2mm** between printers, nozzles, filaments, and slicer profiles; elephant foot alone eats that much. So:
+
+- **"Very tight but it fits" on the designer's own printer is "does not go together" on a printer running slightly wide.** That is a support thread, not a print.
+- The designer's printer is the *best* case, not the average case. It is the machine the part was iterated on.
+
+Loosen toward the middle of the functional band before publishing, not to the edge that happens to work for you. The cost is asymmetric: a fit 0.1mm looser than ideal is slightly less crisp, while a fit 0.1mm tighter than someone's tolerance is unusable.
+
+Counter-check before loosening: confirm the loose end still works. Going from a tight-but-functional fit to a wobbly one is a real regression, and on a display piece it is worse than the tight fit you started with. Reprint and confirm rather than assuming more clearance is free.
+
 ### Clearance recipes from accepted tutorial sources (NOT printer-verified by us)
 
 Recipes recorded so a future first print has a baseline. None of the values below are validated by our own prints; expect to tune for your printer + slicer + material. See patterns.md N44 / N45 for full geometry recipes.
@@ -856,3 +882,35 @@ So:
 - Keep verification/printing trivially safe, or put it in a **separate** `execute` after the build lands.
 - Make build scripts **idempotent** (delete-by-name at the top) so a rerun after a rollback is free.
 - This is not a reason to `try/except` around `run()`. Swallowing the traceback loses the diagnosis and still rolls back. Fix the reporting bug.
+
+
+## Restarting Fusion invalidates the MCP session; the client 404s until it reconnects
+
+Symptom: every MCP call fails with `Client error '404 Not Found' for url 'http://127.0.0.1:27182/mcp'`, while Fusion is plainly running and healthy.
+
+This looks exactly like "the MCP server is off", and the instinct is to go toggle **Preferences > General > API > Fusion MCP Server**. That is the wrong fix and it makes things worse: each restart mints a new server that invalidates the session again.
+
+What is actually happening: MCP's streamable-HTTP transport is **session-based**. The client holds an `Mcp-Session-Id` from its first handshake. Restart Fusion and the new server has never heard of that id, so it answers `404` to every POST. The transport is behaving correctly; the client is talking to a server that does not know it.
+
+Distinguish the two cases from outside the client, because they look identical from inside it:
+
+```
+GET http://127.0.0.1:27182/mcp
+  -> 404   the route does not exist. The MCP server really is off. Enable it in Preferences.
+  -> 405   Method Not Allowed. The route EXISTS and only accepts POST. The server is UP;
+           your session is stale.
+```
+
+Confirm with a fresh handshake, which is unaffected by the dead session:
+
+```powershell
+$body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}}'
+Invoke-WebRequest -Uri "http://127.0.0.1:27182/mcp" -Method POST -Body $body `
+  -ContentType "application/json" -Headers @{ "Accept" = "application/json, text/event-stream" }
+```
+
+A `200` plus an `Mcp-Session-Id` header proves the server is fine and the problem is entirely on the client side.
+
+**The fix is to reconnect the client**, not to restart Fusion: in Claude Code, `/mcp` and reconnect the `fusion` server (or restart Claude Code). Only the user can do this; there is no tool call that re-handshakes your own transport.
+
+Also check `Get-NetTCPConnection -LocalPort 27182` and confirm the owning PID is `Fusion360`. If something else holds the port, that is a genuinely different problem.
