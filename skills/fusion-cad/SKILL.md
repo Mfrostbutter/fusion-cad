@@ -1,203 +1,137 @@
 ---
 name: fusion-cad
-description: "Use this skill whenever the user wants to do CAD work through the Autodesk Fusion MCP (fusion_mcp_execute, fusion_mcp_read, fusion_mcp_update, fusion_mcp_electronics_read). Covers parametric constrained sketches, extrudes, holes, fillets, multi-body modeling, assemblies and components, as-built joints, motion (hinges, sliders), print-in-place mechanisms and print orientation, exports to STL/3MF/STEP, undo/redo, screenshots, the apiDocumentation lookup pattern, explicit camera control, and current API-stability guidance from the local Fusion API corpus. Trigger on any mention of Fusion 360, the Fusion MCP, .f3d/.f3z/.step files, parametric CAD design, building or editing 3D models programmatically, sketches, extrudes, fillets, counterbore holes, components, joints, hinges, sliders, assemblies, print-in-place parts, print orientation, or when the user asks to model a bracket, tray, mount, panel, organizer, rack mount, or any functional 3D-printed product. Use even if the user does not name the MCP explicitly: if they ask Claude to design something in Fusion or build a part, this skill applies."
+description: "Use this skill whenever the user wants to do CAD work through Autodesk Fusion, either via the fusion-cad-mcp server (75 named tools: create_sketch, add_rectangle, extrude, add_hole, fillet_edges, create_joint, export, and so on) or via Autodesk's own Fusion MCP (fusion_mcp_execute, fusion_mcp_read, fusion_mcp_update, fusion_mcp_electronics_read). Covers parametric constrained sketches, extrudes, holes, fillets, chamfers, shells, multi-body modeling, assemblies and components, as-built joints, motion (hinges, sliders), print-in-place mechanisms and print orientation, exports to STL/3MF/STEP, undo/redo, screenshots, API documentation lookup, and explicit camera control. Trigger on any mention of Fusion 360, the Fusion MCP, .f3d/.f3z/.step files, parametric CAD design, building or editing 3D models programmatically, sketches, extrudes, fillets, counterbore holes, components, joints, hinges, sliders, assemblies, print-in-place parts, print orientation, or when the user asks to model a bracket, tray, mount, panel, organizer, rack mount, or any functional 3D-printed product. Use even if the user does not name the MCP explicitly: if they ask Claude to design something in Fusion or build a part, this skill applies."
 ---
 
-# Fusion 360 MCP
+# Fusion CAD
 
-> Created from production Fusion 360 MCP sessions plus a dedicated stress test. Free to use and modify.
+Drive Autodesk Fusion safely and efficiently through an MCP server.
 
-This skill teaches Claude to drive the Autodesk Fusion MCP server safely and efficiently. The MCP exposes four tools that wrap the Fusion Python API:
+> Built from production Fusion sessions plus a dedicated live test battery against Fusion 2704.1.23. Free to use and modify.
 
-- `fusion_mcp_execute` runs Python in the active document, or does file ops
-- `fusion_mcp_read` does screenshots, API docs lookup, document and project queries
-- `fusion_mcp_update` does undo/redo
-- `fusion_mcp_electronics_read` reads Schematic / Board / Library data from an active Electronics design (read-only; Autodesk tags the underlying Electronics API surface as Preview, so do not depend on it in distributed workflows without explicit preview opt-in per the rule below)
+## Which server are you talking to?
 
-Patterns in this skill were verified across multiple real product design sessions plus a dedicated stress test of the untested MCP surfaces. Alternatives have specific failure modes documented in `gotchas.md`.
+This matters before anything else, because the tool surface is completely different.
 
-## Decision principles
+**`fusion-cad-mcp` (this project).** 75 named, typed tools: `create_sketch`, `extrude`, `add_hole`, `create_joint`. Each one validates arguments, returns a structured envelope, and encodes the gotchas so you do not have to. **Prefer this whenever it is available.**
 
-These six rules sit above any individual snippet. Follow them and most of the gotchas in `gotchas.md` never trigger.
+**Autodesk's own Fusion MCP.** Four fat tools that take raw Python or query objects:
 
-1. **Parametric first.** Every dimension that might change goes in `userParameters`. Hardcoded numbers in sketches are forbidden. Re-running the script should be safe.
-2. **One feature per `execute` call** during build. Faster debugging, cleaner timeline, scoped failures.
-3. **Name every entity.** Sketches, features, bodies, construction planes. Required for the targeted delete-and-rebuild pattern (`patterns.md` section 19) and for timeline readability when something breaks.
-4. **Assert before extrude.** `assert sk.profiles.count == <expected>` immediately after `sk.isComputeDeferred = False`. Profile count is the only signal for self-intersection (returns 2, not an error).
-5. **Verify with bounding box AND volume.** Screenshots can deceive about orientation; `body.boundingBox` per axis is ground truth. `body.volume` (returns cm^3) is a fast spec-vs-actual cross-check. Pair them after every body-adding feature. Volume is a stronger check than it looks: across 35+ features on a real part it tracked intended geometry (`intended_volume - overlap_with_prior_features`) to under 1 mm^3 every time, catching missed cuts and wrong `participantBodies` that screenshots hid (`patterns.md` section 24).
-6. **Constrain sketches with the corner-anchor mechanism.** Build rectangles via `addCenterPointRectangle` plus explicit horizontal/vertical constraints and positive distance dimensions to a SPECIFIC corner (`patterns.md` section 2). Avoid diagonal-midpoint and symmetric-axis centering (section 43); they leave the UI under-constrained even when the API disagrees. Confirm with the lock badge in the browser, not `isFullyConstrained` alone, which can read True while the sketch is still under-constrained (`gotchas.md`).
-7. **Treat Preview API badges as release gates.** If the local API corpus page says Preview, do not use it in a public/distributed workflow unless the user explicitly opts into preview risk. As of the 2026-05-31 corpus review: ray-mesh and curved-face construction planes are stable; UCS, Electronics, AssemblyConstraint, and VolumetricModel pages are Preview.
+- `fusion_mcp_execute` runs a Python script, or does file operations
+- `fusion_mcp_read` screenshots, API doc lookup, document and project queries
+- `fusion_mcp_update` undo and redo
+- `fusion_mcp_electronics_read` read-only Electronics data (Preview API; do not depend on it in distributed work)
 
-## When to reach for each tool
+`fusion-cad-mcp` sits **in front of** Autodesk's server rather than replacing it: it generates Python and pushes it through `fusion_mcp_execute`. So both are the same Fusion underneath, and every gotcha in `gotchas.md` applies to both.
 
-| Tool | When to use |
-|---|---|
-| `execute` (script) | Any model change. Param adds, sketches, extrudes, fillets, hole features, edits to existing features, body cleanup. About 80% of calls. |
-| `read` (screenshot) | Verifying geometry after a non-trivial change. ALWAYS run the explicit fit-view block from `patterns.md` section 20 before screenshotting; named directions do not auto-fit and even `direction: "current"` is unreliable on Untitled docs. |
-| `read` (apiDocumentation) | BEFORE writing a script that uses an unfamiliar method. Always set `apiCategory`. Omitting it returns success with empty data (silent failure). |
-| `read` (document, projects) | Listing open or recent docs, searching by name, getting project IDs. Use `search` (fuzzy, cross-project) when looking for a specific design. |
-| `update` (undo, redo) | Last resort. Undo treats the prior `execute` as ONE atomic transaction; if it added params AND geometry, undo wipes both silently. Prefer the delete-loop cleanup pattern in `patterns.md`. |
-| `execute` (document) | File ops: open, save, close. NEVER call without explicit user instruction. Save on Untitled docs is refused by the MCP; initial SaveAs must happen in the Fusion UI. Close on dirty docs requires `userConfirmedSaveAndClose` or `userConfirmedCloseWithoutSave`; surface the choice to the user. |
-
-## Script anatomy
-
-Every `execute` script body must use this shape. No other entry point works.
-
-```python
-import adsk.core, adsk.fusion
-
-def run(_context: str):
-    app = adsk.core.Application.get()
-    design = adsk.fusion.Design.cast(app.activeProduct)
-    root = design.rootComponent
-    # ... work here ...
-    print(f"summary: bodies={root.bRepBodies.count}")  # tool returns this as message
-```
-
-Rules:
-
-1. Define exactly `def run(_context: str):`. No other name works.
-2. Do NOT wrap `run()` in `try/except`. Exceptions return as the tool error with full traceback. Catching kills the traceback and turns a 30-second fix into a 10-minute debug.
-3. Use `print()` for any data you need back. Tool result `message` captures stdout.
-4. Print the bounding box after any extrude. Screenshots can deceive on orientation; bounding box does not.
-
-## Default workflow for new geometry
-
-1. If the doc state is uncertain, run a tiny read script first: print `bRepBodies.count`, `sketches.count`, `features.count`, `design.unitsManager.defaultLengthUnits`.
-2. Add user parameters first, idempotently. See `patterns.md`, "Idempotent user-parameter add". Reference them in both feature inputs (extrude distances, fillet radii, plane offsets) AND in sketch dimensions as needed — parametric sketches work (verified 2026-05-31 via live round-trip in V3). A lock badge may not appear on a script-built sketch until you enter edit mode once; the constraints are fine regardless, see `gotchas.md` G9 lock-badge display lag.
-3. Build geometry one feature per `execute` call. Name every feature (`feat.name = 'main_solid'`). Makes the timeline readable when something goes wrong, and lets `patterns.md` section 19 (targeted delete-and-rebuild) work later.
-4. Assert profile counts before extruding. Self-intersecting polygons return `profiles.count == 2`; closed simple polygons return `1`; broken polygons return `0`.
-5. Print the bounding box to confirm orientation matches intent.
-6. Verify visually: run the fit-view block from `patterns.md` section 20, then screenshot with `direction: "current"`.
-
-## Default workflow for unfamiliar APIs
-
-Before writing a script that touches `HoleFeatureInput`, `ExportManager`, `RevolveFeatures`, `LoftFeatureInput`, or any method whose signature is not memorized:
-
-1. If working from this repo, check `src/api-reference/pages/<Object>_<member>.md` first; it contains the scraped Fusion API page, including Preview and Introduced metadata.
-2. In a shipped plugin session, call `fusion_mcp_read` with `queryType: "apiDocumentation"`, `apiCategory: "member"`, and the method name as `searchPattern`.
-3. Read the signature, arg types, and Preview status.
-4. Then write the script. If the page is Preview, ask before using it.
-
-One read call is cheaper than a failed execute round-trip plus debugging.
-
-## Top gotchas
-
-Full catalog in `gotchas.md`. These are the ones that bite first:
-
-0. **Lock-badge display lag on script-built sketches (G9).** A sketch built by a script can be fully constrained AND have a working parametric link to user parameters, while its browser-tree icon shows no lock badge until you enter edit mode once. `isFullyConstrained` is honest; parametric expressions on sketch dims work. Trust the API flag plus a parametric round-trip, not the badge. See `gotchas.md` G9. This entry replaces an earlier (wrong) version that recommended using only numeric mm literals; corrected `discovery-2026-05-31-constraints-corrected.md` supersedes the 2026-05-30 doc.
-
-1. **Sketch plane orientation.** XY plane is the safe default (extrude up world Z). XZ plane maps sketch Y to NEGATIVE world Z; negate Y in vertex lists for Z-up geometry. YZ plane extrudes along world X and INVERTS sketch X to negative world Z (sketch Y maps to positive world Y); see `gotchas.md` for the exact verified mapping. For any non-XY plane, drop one test `sketchPoint` and read `worldGeometry` before committing coordinates. When in doubt, sketch on XY.
-
-2. **`profiles.count == 2` after closing a 4+ vertex polygon means self-intersection.** The polygon looks like a figure-8 internally. Always `assert sk.profiles.count == <expected>` before extruding.
-
-3. **Undo is dangerous on mixed-content scripts.** It wipes the last `execute` as one atomic transaction. If that script added params AND geometry, both vanish silently. Make scripts idempotent and prefer the delete-loop cleanup over undo.
-
-4. **`apiDocumentation` with no `apiCategory` returns empty silently.** Always set it. Use `"member"` for one function, `"class"` for exploration, `"all"` when unsure.
-
-5. **Internal geometry is always cm, not mm.** `userParameters.itemByName(name).value` returns cm. `Point3D.create(x, y, z)` takes cm. Pass `ValueInput.createByString('30 mm')` for human-readable expressions; Fusion handles the conversion. Only multiply by 10 when PRINTING dimensions for display.
-
-6. **Screenshots need an explicit fit-view first.** Use `patterns.md` section 20 (`vp.fit()` + orientation set + `vp.refresh()`) before EVERY screenshot. `direction: "current"` auto-fits in most cases but is unreliable on Untitled docs and right after script-driven feature additions. Named directions never auto-fit on their own.
-
-7. **Cut through unknown depth: use `setAllExtent(direction)`, not fixed distance.** `setDistanceExtent` stops short when gussets, dividers, or flanges sit below the sketch plane. `setAllExtent(NegativeExtentDirection)` cuts through everything in that direction. Valid for cut and intersect operations only.
-
-8. **Save on Untitled docs fails via MCP.** Initial SaveAs must happen in the Fusion UI. After that, MCP `save` works for revisions. Surface this when the user asks Claude to save a brand-new doc.
-
-9. **Close on dirty docs requires explicit confirmation flag.** Never auto-pick `userConfirmedSaveAndClose` vs `userConfirmedCloseWithoutSave`. Ask the user.
-
-10. **Export paths must be absolute with forward slashes; relative paths fail.** Always `os.makedirs(dirname, exist_ok=True)` before export. Overwrite is silent.
+If only the four-tool server is connected, skip to "Writing raw scripts" at the bottom and lean on `patterns.md`.
 
 ## Reference files
 
-Load on demand:
+Load on demand. This file is the operating manual; those are the depth.
 
-- `patterns.md` reusable Python snippets: params, constrained sketches (corner-anchored rectangle, ellipse, circle, yZ-plane, edge-anchored, re-anchor a pinned entity), extrudes, cuts (multi-profile, setAllExtent, symmetric, tapered, multi-body via participantBodies), OffsetStartDefinition, planes, fillets (UI selection + edit + edge-find by geometry), Mirror replication, composite-via-Join, hole API (simple, counterbore, countersink), exports (STL, 3MF, STEP), idempotent rebuild loop, bounding box check, screenshot defaults, document search, partial-height interior features, targeted delete-and-rebuild, explicit camera fit-view, viewport-to-PNG, doc state sanity-check, stepped solid via Join extrude, volume sanity check, print resolved param values, components and as-built joints (hinge, slider), joint limits, print-in-place travel stop, assembly reorientation for print, and sketch constraint anti-patterns.
-- `gotchas.md` full failure mode catalog with reproductions and fixes.
-- `api-reference/` repo-local scraped API corpus for development and review only. It is not copied into the public plugin artifact and must not be redistributed as Autodesk documentation content.
+| File | What it is | When to load |
+|---|---|---|
+| `tools.md` | All 75 tools: signatures, exact enums, return keys, error codes | Before calling a tool whose arguments you are not sure of |
+| `gotchas.md` | Failure-mode catalog, each with symptom and fix | When something behaves unexpectedly, or before a risky operation |
+| `patterns.md` | Reusable Python for `execute` | When no typed tool covers the operation |
 
-## Quick reference: complete first-call template
+The server can also search these for you without loading them: `find_tool`, `find_gotcha`, `find_pattern`, and `find_api` for Autodesk's API help. **These work with Fusion closed.**
 
-For a brand-new design, this is the canonical opening script:
+## Six rules that prevent most failures
+
+1. **Parametric first.** Every dimension that might change goes in `add_parameters` and gets referenced by name. Hardcoded numbers in sketches are forbidden. Re-running should be safe.
+2. **One feature per call.** Faster debugging, cleaner timeline, scoped failures.
+3. **Name everything.** Sketches, features, bodies, planes. Name-addressing is how you reach things later, and an unnamed timeline is unreadable when something breaks.
+4. **Assert profiles after every sketch.** `assert_profiles(sketch, expected)`. A self-intersecting polygon returns 2 profiles rather than raising, and that is the only signal you get.
+5. **Verify with numbers, not pictures.** `bounding_box` and `volume` after every body-adding feature. Screenshots deceive about orientation and sometimes render blank; volume tracks intended geometry to under 1 mm3 and catches missed cuts that look fine on screen.
+6. **Count entities across anything that replicates.** Patterns, mirrors, joins. Position and volume can all be correct while the count is wrong. This is not hypothetical: an unset pattern direction two silently tripled body counts with every other check passing.
+
+## The two things every tool shares
+
+**The envelope.** Every tool returns `{ok, message, result, state, image, error, traceback}`. One parsing contract.
+
+**`ok: true` does not mean success.** `doc_state` returns `ok: true` with `{"active_design": false}`. `drive_joint` returns `ok: true` when Fusion silently ignored a beyond-limit drive; check `applied`. `move_component` returns `ok: true` when a joint solver overrode the move; check `moved`. `export` returns `ok: true` with `bytes_written: 0`. **Read `result`, not just `ok`.**
+
+**Handles.** Bodies, sketches, components, and joints are addressed by **name**. Faces, edges, and vertices have no stable name and are addressed by an opaque handle, `kind:path:token`. `list_body_entities` converts a body name into handles for its faces, edges, and vertices; that is the only route to sub-entity geometry. Handles go stale after edits and return `handle_invalid`, so never cache them across a feature change.
+
+## Standard build
+
+1. **`doc_state`.** Confirm a design is open and check units before touching anything.
+2. **`add_parameters`.** Idempotent, so existing names are skipped. Do this before geometry to catch typos early.
+3. **`create_sketch` then geometry.** XY is the safe default plane. XZ maps sketch Y to *negative* world Z; YZ inverts sketch X. On any non-XY plane, verify a point's world position before committing coordinates.
+4. **Constrain and dimension.** Use parameter-name expressions in `add_dimension`; they propagate when the parameter changes. Anchor rectangles to a specific corner rather than a diagonal midpoint.
+5. **`assert_profiles`.** Non-negotiable.
+6. **Feature.** `extrude`, `revolve`, `add_hole`, and so on, one per call, each named.
+7. **`bounding_box` and `volume`.** Compare against intent.
+8. **`audit_feature_health`** after anything that edits sketches, parameters, or features. It catches downstream breakage the API otherwise reports as healthy.
+9. **Export** with an absolute path, and check `bytes_written`.
+
+## Traps that cost the most time
+
+Full catalog in `gotchas.md`. These bite first.
+
+**Sub-components are mostly invisible.** Most sketch tools resolve sketches in the **root component only**, and there is no parameter to reach a sketch inside a component. `extrude`, `revolve`, and `project_to_sketch` all behave this way. Features are the same for `mirror_feature` and both pattern tools.
+
+**Internal units are centimeters.** Tools convert for you at the boundary, so you pass and receive mm. Raw scripts do not: `Point3D.create` takes cm, and `parameter.value` returns cm. Use `ValueInput.createByString("30 mm")` and let Fusion convert.
+
+**Edge length is chord distance, not arc length.** The geometric fillet and chamfer filters measure straight-line distance between endpoints, so a closed circular edge measures 0 and is never selected, and arcs are under-measured.
+
+**`add_hole` is world-Z locked.** It drills a `+Z`-facing face, prefers the one containing your XY, and **ignores the Z you pass**. Rotate the body and there is no `+Z` face at all. Check `position_on_face` in the response.
+
+**Undo is atomic on the whole prior call.** A script that added parameters *and* geometry loses both, silently. Prefer targeted deletion.
+
+**An exception rolls back the entire script.** There are no partial commits inside one `execute`.
+
+**Joint limits and drives report in internal units** (radians, centimeters), not what you passed in.
+
+**`rib` is not scriptable.** `RibFeatures` is read-only in the current API. The tool returns `rib_not_scriptable` rather than crashing. Model a rib as a thin extrude with `operation="join"`.
+
+**Screenshots are the weakest check you have.** Keep width at or below roughly 400 px or the base64 blows the tool-result token limit. Use them to show a human, not to verify geometry.
+
+**Preview API badges are release gates.** If `find_api` reports a page as Preview, do not build distributed work on it without the user explicitly accepting the risk.
+
+## Writing raw scripts
+
+`execute` is the escape hatch, and it is the only tool with no validation. Reach for it when no typed tool covers the operation, after checking `find_api` and `find_pattern`.
 
 ```python
 import adsk.core, adsk.fusion
 
-def run(_context: str):
+def run(_ctx):
     app = adsk.core.Application.get()
     design = adsk.fusion.Design.cast(app.activeProduct)
     root = design.rootComponent
-
-    # 1. Sanity-check doc state
-    print(f"bodies={root.bRepBodies.count} sketches={root.sketches.count} "
-          f"features={root.features.count} units={design.unitsManager.defaultLengthUnits}")
-
-    # 2. Add params idempotently
-    param_defs = [
-        ('length', '100 mm', 'mm', ''),
-        ('width',  '50 mm',  'mm', ''),
-        ('height', '20 mm',  'mm', ''),
-    ]
-    params = design.userParameters
-    for name, expr, unit, comment in param_defs:
-        if not params.itemByName(name):
-            params.add(name, adsk.core.ValueInput.createByString(expr), unit, comment)
-
-    # 3. Constrained sketch (corner-anchored, see patterns.md section 2) + extrude
-    P = adsk.core.Point3D.create
-    DO = adsk.fusion.DimensionOrientations
-    sk = root.sketches.add(root.xYConstructionPlane)
-    sk.name = 'outer'
-    sk.isComputeDeferred = True
-    rect = sk.sketchCurves.sketchLines.addCenterPointRectangle(
-        P(0, 0, 0), P(2.5, 1.25, 0))   # initial size; dimensions drive the final size
-    L_top, L_left, L_bot, L_right = rect.item(0), rect.item(1), rect.item(2), rect.item(3)
-    sk.isComputeDeferred = False
-
-    # find SW corner (shared by left + bottom edges)
-    sw_pt = None
-    for sp in [L_left.startSketchPoint, L_left.endSketchPoint]:
-        for sp2 in [L_bot.startSketchPoint, L_bot.endSketchPoint]:
-            if sp.geometry.x == sp2.geometry.x and sp.geometry.y == sp2.geometry.y:
-                sw_pt = sp; break
-        if sw_pt: break
-
-    gc = sk.geometricConstraints
-    gc.addHorizontal(L_top); gc.addHorizontal(L_bot)
-    gc.addVertical(L_left);  gc.addVertical(L_right)
-
-    sd = sk.sketchDimensions
-    dim_w = sd.addDistanceDimension(L_top.startSketchPoint, L_top.endSketchPoint,
-        DO.HorizontalDimensionOrientation, P(0, 2, 0))
-    dim_d = sd.addDistanceDimension(L_left.startSketchPoint, L_left.endSketchPoint,
-        DO.VerticalDimensionOrientation, P(-3, 0, 0))
-    dim_x = sd.addDistanceDimension(sk.originPoint, sw_pt,
-        DO.HorizontalDimensionOrientation, P(-2, -2, 0))
-    dim_y = sd.addDistanceDimension(sk.originPoint, sw_pt,
-        DO.VerticalDimensionOrientation, P(-3, -1, 0))
-    # Parametric sketch dims: parameter-name expressions work and propagate when the param changes.
-    # If you want a baked-in literal, write "70 mm" instead. See gotchas.md G9 for the
-    # lock-badge-display-lag gotcha (cosmetic; constraints are real either way).
-    dim_x.parameter.expression = 'length / 2'
-    dim_y.parameter.expression = 'width / 2'
-    dim_w.parameter.expression = 'length'
-    dim_d.parameter.expression = 'width'
-    assert sk.isFullyConstrained
-    assert sk.profiles.count == 1, f"expected 1 profile, got {sk.profiles.count}"
-
-    extrudes = root.features.extrudeFeatures
-    ext_in = extrudes.createInput(sk.profiles.item(0),
-        adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
-    ext_in.setDistanceExtent(False, adsk.core.ValueInput.createByString('height'))
-    feat = extrudes.add(ext_in)
-    feat.name = 'body_solid'
-
-    # 4. Bounding box check
-    body = feat.bodies.item(0)
-    body.name = 'main'
-    bb = body.boundingBox
-    print(f"bbox X:{bb.minPoint.x*10:.2f} to {bb.maxPoint.x*10:.2f} mm")
-    print(f"bbox Y:{bb.minPoint.y*10:.2f} to {bb.maxPoint.y*10:.2f} mm")
-    print(f"bbox Z:{bb.minPoint.z*10:.2f} to {bb.maxPoint.z*10:.2f} mm")
+    # work here
+    print(f"bodies={root.bRepBodies.count}")
 ```
 
-Use this as the scaffold for any new design. Replace param defs, sketch geometry, and feature operations as needed.
+1. The entry point must be exactly `def run(_ctx):`. No other name works. (Autodesk's `fusion_mcp_execute` uses `def run(_context: str):`.)
+2. **Never wrap the body in try/except.** Exceptions return as the tool error with a full traceback; catching them destroys it.
+3. `print()` is the return channel; stdout becomes `message`.
+4. Print the bounding box after any extrude.
+
+Look the API up before writing against an unfamiliar method. `find_api` costs one call; a failed round trip plus debugging costs far more. Always pass a category when using Autodesk's `apiDocumentation` query, since omitting it returns success with empty data.
+
+## Setup
+
+`fusion-cad-mcp` is at **https://github.com/Mfrostbutter/fusion-cad-mcp**:
+
+```bash
+pip install "fusion-cad-mcp @ git+https://github.com/Mfrostbutter/fusion-cad-mcp.git"
+```
+
+Then point your MCP client at the `fusion-cad-mcp` command. `CONNECT.md` in that repo has per-client config and troubleshooting.
+
+The server talks to Autodesk's MCP at `127.0.0.1:27182`, which is enabled in **Preferences > General > API > Fusion MCP Server**. Fusion must be running with a design open.
+
+`find_api` needs a local corpus of Autodesk's API help, which is not redistributed. Build it once:
+
+```
+pip install "fusion-cad-mcp[corpus] @ git+https://github.com/Mfrostbutter/fusion-cad-mcp.git"
+fusion-cad-mcp corpus build --i-accept-autodesk-terms
+```
+
+Everything else works without it.
+
+If Fusion is restarted, the server re-handshakes automatically on the next call. If the *client* session goes stale instead, that shows up as repeated 4xx and needs a client-side reconnect, which only the user can do.

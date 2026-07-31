@@ -75,6 +75,11 @@ Internal units are cm. `ValueInput.createByString('30 mm')` accepts unit suffixe
 55. Trace a silhouette from a screenshot (pixel table to mm)
 56. Variant matrix from one design: name the axes into the filename
 57. Fit artwork to a print: measure the gaps, not the strokes
+58. Leaning cut groove (flute) via a perpendicular construction plane
+59. Pattern on Path (when the seed really is perpendicular to the path)
+60. Restore-by-join: terminate a field of cuts on a clean boundary
+61. Framed fluted panel (plinth, top ring, corner posts, mating pads)
+62. Vertical dovetail interlock between stacked or abutting modules
 
 ## 1. Idempotent user-parameter add
 
@@ -86,7 +91,7 @@ param_defs = [
     ('width',  '148 mm', 'mm', ''),
     ('height', '38 mm',  'mm', ''),
     ('wall',   '3 mm',   'mm', ''),
-    ('floor',  '3 mm',   'mm', ''),
+    ('floor_t', '3 mm',  'mm', ''),      # NOT 'floor' -- reserved, see below
     ('total_height',
      'base_height + air_gap + 2 * floor_thickness',
      'mm', 'COMPUTED'),
@@ -99,6 +104,12 @@ for name, expr, unit, comment in param_defs:
 ```
 
 Expressions can reference other params directly.
+
+**Reserved names.** `userParameters.add` rejects any name that collides with a built-in expression
+function, raising `RuntimeError: 3 : param name is not valid`. `floor` is the one that bites in
+practice, because it is the natural name for a tray's floor thickness. Avoid: `floor`, `ceil`,
+`abs`, `min`, `max`, `mod`, `round`, `sign`, `sqrt`, `pi`, `e`, and the trig names. Suffix instead:
+`floor_t`, `min_gap`. Verified 2026-07-31: `floor` REJECTED, `floor_t` / `wall` / `corner_r` accepted.
 
 ## 2. Parametric box from a sketched rectangle
 
@@ -1721,3 +1732,222 @@ Render an original / eroded / difference triptych and look at it. Numbers cannot
 ### Getting permission first
 
 Eroding is **modifying someone's mark**. That is a design decision with a legal edge, not a technical one. Ask before doing it, and record who said yes. A licence to *use* a mark is not a licence to *redraw* it, and the person who owns it may care about 0.17mm more than you would guess.
+
+## 58. Leaning cut groove (flute) via a perpendicular construction plane
+
+A decorative flute that leans off vertical. Build it as a CUT, never as a joined proud rib: a joined
+leaning cylinder overhangs the body top and bottom and needs trimming, whereas a cut is bounded by
+the body for free.
+
+Geometry: a cylinder of radius `rib_r` whose axis sits `rib_axis_off` OUTSIDE the face, so it bites
+`rib_depth = rib_r - rib_axis_off` into the wall. Groove width at the surface is
+`2 * sqrt(rib_r^2 - rib_axis_off^2)`.
+
+```python
+# rib_r 2.5, rib_depth 1.2 -> axis 1.3 outboard, groove 4.27 wide, 1.73 land at 6 pitch
+params.add('rib_axis_off', VI('rib_r - rib_depth'), 'mm', 'COMPUTED')
+
+# 1. plane offset outboard of the face (XZ shown; use yZ for an X-normal face)
+pi = comp.constructionPlanes.createInput()
+pi.setByOffset(comp.xZConstructionPlane, VI('face_y - rib_axis_off'))
+plane = comp.constructionPlanes.add(pi)
+
+# 2. the axis line. XZ mapping: sketch X = world X, sketch Y = -world Z.
+#    Constrain the endpoint with TWO component distances, never an angular dim (see gotchas).
+sk = comp.sketches.add(plane)
+F = sk.sketchCurves.sketchLines.addByTwoPoints(P(x0, -z0, 0), P(x1, -z1, 0))
+sk.geometricConstraints.addCoincident(F.startSketchPoint, sk.project(comp.zConstructionAxis).item(0))
+sd = sk.sketchDimensions
+sd.addDistanceDimension(sk.originPoint, F.startSketchPoint,
+    DO.VerticalDimensionOrientation, t).parameter.expression = 'rib_z0'
+sd.addDistanceDimension(F.startSketchPoint, F.endSketchPoint,
+    DO.HorizontalDimensionOrientation, t).parameter.expression = 'rib_len * sin(rib_lean)'
+sd.addDistanceDimension(F.startSketchPoint, F.endSketchPoint,
+    DO.VerticalDimensionOrientation, t).parameter.expression = 'rib_len * cos(rib_lean)'
+assert sk.isFullyConstrained
+ws, we = F.worldGeometry.startPoint, F.worldGeometry.endPoint
+assert we.z > ws.z, 'axis points downward'          # direction, not just constraint state
+
+# 3. plane PERPENDICULAR to the axis at its start. Its origin lands exactly on the
+#    line start and its normal follows the tangent, so a circle constrained to the
+#    sketch origin is automatically centred on the axis.
+pi2 = comp.constructionPlanes.createInput()
+pi2.setByDistanceOnPath(F, adsk.core.ValueInput.createByReal(0.0))
+npl = comp.constructionPlanes.add(pi2)
+
+sk2 = comp.sketches.add(npl)
+c = sk2.sketchCurves.sketchCircles.addByCenterRadius(P(0, 0, 0), 0.25)
+sk2.geometricConstraints.addCoincident(c.centerSketchPoint, sk2.originPoint)
+sk2.sketchDimensions.addDiameterDimension(c, t).parameter.expression = 'rib_r * 2'
+
+# 4. one-sided cut along the axis; positive extent runs along the line direction
+ci = ext.createInput(sk2.profiles.item(0), adsk.fusion.FeatureOperations.CutFeatureOperation)
+ci.setDistanceExtent(False, VI('rib_len'))
+ci.participantBodies = [body]
+seed = ext.add(ci)
+```
+
+Then replicate with a **rectangular** pattern along the face, one set per planar face. Do NOT use
+Pattern on Path with Path Direction: it discards the lean (see gotchas). Print angle 20 degrees from
+vertical is 70 from horizontal, so flutes are self-supporting.
+
+Verify the lean survived by querying the cut faces, not by looking at a screenshot:
+
+```python
+leans = [math.degrees(math.acos(abs(f.geometry.axis.z))) for f in body.faces
+         if isinstance(f.geometry, adsk.core.Cylinder) and f.geometry.radius < 0.3]
+print(min(leans), max(leans))      # must both equal rib_lean
+```
+
+## 59. Pattern on Path (when the seed really is perpendicular to the path)
+
+Correct use: teeth on a belt, links on a chain, anything whose orientation SHOULD be derived from
+the path. The path must be a proxy, and prefer a sketch curve over a body edge because any cut you
+make along an edge fragments it.
+
+```python
+path = adsk.fusion.Path.create(
+    line.createForAssemblyContext(occurrence),                 # proxy is mandatory
+    adsk.fusion.ChainedCurveOptions.connectedChainedCurves)    # chains a closed loop
+
+pp = comp.features.pathPatternFeatures
+pin = pp.createInput(ents, path,
+                     VI('floor(perimeter / pitch)'),           # quantity, parametric
+                     VI('pitch'),
+                     adsk.fusion.PatternDistanceType.SpacingPatternDistanceType)
+pin.isOrientationAlongPath = True                              # UI "Path Direction"
+pin.patternComputeOption = adsk.fusion.PatternComputeOptions.IdenticalPatternCompute
+pp.add(pin).name = 'teeth'
+```
+
+`IdenticalPatternCompute` avoids the "too many pattern instances" warning that `Adjust` throws.
+
+Drive quantity from an expression rather than the tutorial's measure-the-loop-and-paste-the-number
+ritual: `'floor((2 * outer_w + 2 * depth) / pitch)'` keeps the pattern correct when the profile
+changes. Instances that fall past the end of the path continue in a straight line from the endpoint
+and simply cut nothing, so over-provisioning quantity is safe.
+
+## 60. Restore-by-join: terminate a field of cuts on a clean boundary
+
+See the gotchas entry for the full reasoning. The shape of the move:
+
+```python
+# 1. overrun: start each cut past the boundary so its angled end cap is buried
+params.add('rib_z0', VI('plinth_h - rib_r'), 'mm', 'COMPUTED')
+
+# 2. restore: join back the region that should have stayed solid, AFTER the cuts
+ei = ext.createInput(outer_sketch.profiles.item(0),
+                     adsk.fusion.FeatureOperations.JoinFeatureOperation)
+ei.setDistanceExtent(False, VI('plinth_h'))
+ei.participantBodies = [body]
+ext.add(ei).name = 'plinth_band'
+```
+
+Reusing the body's own outer sketch profile keeps the restore exactly flush with the silhouette and
+costs no new sketch.
+
+## 61. Framed fluted panel (plinth, top ring, corner posts, mating pads)
+
+A fluted field needs a frame, or it reads as damage: flutes sawtooth against the base, collide with
+each other at corners, serrate the top rim, and stop parts seating flat against each other. Four
+applications of section 60, all after the flute cuts:
+
+| Boundary | Shape | Note |
+|---|---|---|
+| Bottom | outer profile, Z 0..`plinth_h` | also the natural home for tongue/groove keying |
+| Top rim | **RING**: outer profile offset inward by ~2 mm, Z `h - top_band`..`h` | a solid block seals every cavity |
+| Vertical corners | wall-thick square at one corner, patterned 2x2, full height | width capped by the nearest cavity; `wall` is always safe |
+| Contact faces | pad on that face only, spanning the CONTACT height | modules differ in height, so only part of a face touches |
+
+Ring profile selection:
+
+```python
+curves = adsk.core.ObjectCollection.create()
+for l in outer_lines: curves.add(l)
+sk.offset(curves, P(cx, cy, 0), 0.2)            # inward; creates a live offset constraint
+profs = [(sk.profiles.item(i), sk.profiles.item(i).areaProperties().area)
+         for i in range(sk.profiles.count)]
+ring = min(profs, key=lambda t: t[1])[0]        # ring is the smaller of the two
+```
+
+Corner posts, seeded once and patterned to all four corners:
+
+```python
+ri = rp.createInput(ents, comp.xConstructionAxis, VI('2'), VI('outer_w - corner_band'), SPACING)
+ri.setDirectionTwo(comp.yConstructionAxis, VI('2'), VI('depth - corner_band'))
+```
+
+Verify the frame by querying the flute Z range per body; it must equal
+`plinth_h .. module_height - top_band` exactly.
+
+**Accept one limit.** The flute adjacent to each corner post feathers to a point. A groove leaning
+`a` degrees sweeps `h * tan(a)` horizontally over height `h`, so no vertical line ever sits between
+flutes at every height. The sliver is thin enough that the slicer drops it.
+
+## 62. Vertical dovetail interlock between stacked or abutting modules
+
+The general problem: two parts meet on a flat vertical face and must not slide apart in use. Work
+out which axes are ALREADY blocked before designing anything; usually only one is free, and that
+determines the whole mechanism.
+
+A plain rail in a blind groove blocks X (the groove is closed at both ends) and Z (the groove roof),
+and leaves Y, the pull-apart direction, completely free. Resisting pull-apart needs an undercut, and
+an undercut cannot be assembled by pushing along the axis it blocks, so it forces a sliding
+assembly direction. A blind rail forbids sliding. The rail is therefore not fixable in place; the
+assembly direction has to change.
+
+**Run the dovetail vertically, never horizontally.** A dovetail is a prism. Extruded along Z, its
+cross-section is constant in the horizontal plane, so every flank is a vertical wall and nothing
+overhangs. The same dovetail run horizontally along a vertical face has a near-horizontal underside,
+the worst possible FDM overhang. Printability picks the axis.
+
+**Put the male on the TALLER part and the socket in the SHORTER one.** The socket has to run out
+through the top of its part so the mating part can drop on. Cut it into the taller part and that
+open slot is exposed above the joint. Cut it into the shorter part and the taller neighbour covers
+it completely. This is what makes a dovetail viable between parts of unequal height, which is
+usually why it gets wrongly rejected.
+
+```python
+# depth is bounded by the wall behind the socket -- check this FIRST
+assert wall_solid - (dt_depth + dt_clear) > 1.2, 'socket leaves too little wall'
+
+params.add('dt_depth',   VI('1.6 mm'), 'mm', 'engagement depth')
+params.add('dt_w_root',  VI('12 mm'),  'mm', 'width at the mating face')
+params.add('dt_angle',   VI('45 deg'), 'deg', 'flank angle from the pull axis')
+params.add('dt_w_tip',   VI('dt_w_root + 2 * dt_depth * tan(dt_angle)'), 'mm', 'COMPUTED')
+# socket: true parallel offset, so clearance is dt_clear NORMAL to every face
+params.add('dt_sock_d',      VI('dt_depth + dt_clear'), 'mm', 'COMPUTED')
+params.add('dt_sock_w_root', VI('dt_w_root + 2 * dt_clear / cos(dt_angle)'), 'mm', 'COMPUTED')
+params.add('dt_sock_w_tip',  VI('dt_sock_w_root + 2 * dt_sock_d * tan(dt_angle)'), 'mm', 'COMPUTED')
+# mouth overrun keeps the cut off the body boundary; extend along the same flank lines
+params.add('dt_mouth_w', VI('dt_sock_w_root - 2 * dt_over * tan(dt_angle)'), 'mm', 'COMPUTED')
+```
+
+Sketch the trapezoid on the **XY plane** and extrude along Z. Narrow at the mating face, wide at the
+tip. Jitter the two flat edges so Fusion does not auto-infer horizontal (see gotchas), constrain
+them explicitly, then dimension the remaining 6 DOF.
+
+```python
+pts = [(cx - w_root/2, y_f), (cx + w_root/2, y_f + J),
+       (cx + w_tip/2,  y_f - d), (cx - w_tip/2,  y_f - d + J)]
+```
+
+| Feature | Operation | Extent |
+|---|---|---|
+| male, on the taller part | Join | `setDistanceExtent(False, '<shorter_part_height>')` |
+| socket, in the shorter part | Cut | `setDistanceExtent(False, '<its_height> + 5 mm')`, through the top |
+
+Mirror the seed about the YZ plane for the second dovetail; two per joint blocks rotation about Z.
+
+Lead-in chamfer on the male top, sized so the chamfered top is narrower than the socket mouth, makes
+the drop-on self-aligning. Select its edges by world coordinates, not by face, because the male's
+top face may merge with coplanar neighbours (see gotchas).
+
+Verify: `body.volume` delta against `2 * ((w_root + w_tip) / 2) * depth * height` for the male and
+the socket equivalent, then an interference check across every body. Zero pairs plus a bounding box
+that reaches into the neighbour's territory proves capture.
+
+**What this locks.** X and Y fully; down-Z is whatever the parts sit on; up-Z is the intended
+removal direction. That is a complete lock for anything resting on a surface. Add a detent only if a
+fit-check print feels loose, and only if some member can actually flex the detent height; a 1.6 mm
+wall over a 16 mm span reads as a hard push, not a click.
