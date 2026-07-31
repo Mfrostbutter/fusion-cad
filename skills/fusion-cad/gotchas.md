@@ -454,13 +454,25 @@ cut_in.participantBodies = [body]
 
 Without this, Fusion may pick the wrong body or apply the cut to all candidate bodies. Always set when more than one body is present. Also required for the Join extrude pattern (`patterns.md` section 23) so the lip flange joins onto the body rather than creating a new disconnected solid.
 
-## CAD volume is NOT a filament-weight estimate
+## CAD volume is NOT a filament-weight estimate, and the correction factor is not a constant (corrected 2026-07-31)
 
-`body.volume` (returns cm^3) is the geometric solid volume. Real print weight is dramatically lower because slicers use sparse infill, fixed wall counts, and don't fill cavities the way a solid would.
+`body.volume` (returns cm^3) is the geometric solid volume. Printed mass is lower, because sparse infill leaves air inside anything thick enough to have an inside.
 
-Symptom: a 306 cm^3 tray modeled in Fusion estimates "~310g of ABS at solid density" but actually prints at ~90g (30% infill, 3 perimeters, 5 top/bottom layers). Pricing off the solid number kills margin; pricing off a guess is just as bad.
+**The trap is not the first half of that sentence, it is assuming a fixed ratio.** Measured on two real parts:
 
-**Rule.** Treat any pre-slice filament weight as provisional. Slice the actual STL in Bambu Studio (or whichever slicer) and read grams + print time from there. Lock COGS only after the first verified print confirms the slicer numbers.
+| Part | Geometry | Printed mass as % of solid |
+|---|---|---|
+| 306 cm^3 tray, 30% infill | chunky, infill dominates | **~29%** |
+| Fluted organizer shells, 3.2 mm walls | thin-walled, perimeters dominate | **68.2%** |
+| Its inserts, 3.0 mm walls, large cavities | thin-walled, more room for infill | **59.7%** |
+
+A 3.2 mm wall at ~0.42 mm line width is 7-8 perimeters, so it is **100% solid and the infill percentage never applies to it at all**. Only floors and thick plinth-like regions contain any infill. Carrying the 29% figure from a chunky part onto a thin-walled one underestimated filament by **2.1x** and would have set a price on a set that costs twice what was budgeted.
+
+Note the last two rows are the same design: shells and inserts differed by 8.5 points. Predicting the inserts from the shell ratio still overshot by 14%.
+
+**Rule.** Any pre-slice number is provisional, full stop. Do not scale CAD volume by a remembered ratio; slice the actual STL and read grams and time. If you must estimate before slicing, bound it: thin-walled parts approach solid density, chunky parts approach the infill fraction, and the answer is somewhere between.
+
+**Two-tone costs more, not less**, and the cheap spool belongs on the heavy part. One colour per plate beats an AMS swap: a mid-print colour change purges more filament than a small part weighs, and per-plate printing reports `filament change times: 0` with no purge tower.
 
 ## `document/open` (execute) requires fileId in urn form
 
