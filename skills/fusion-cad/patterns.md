@@ -22,12 +22,12 @@ Internal units are cm. `ValueInput.createByString('30 mm')` accepts unit suffixe
 4. Multi-profile cut (n cells in one feature)
 5. Cut through unknown depth
 6. Symmetric extrude (centered on sketch plane)
-7. Tapered extrude (legacy countersink approach)
-8. Holes via HoleFeatureInput (preferred)
+7. Tapered extrude (cone, legacy countersink approach)
+8. Holes via HoleFeatureInput (preferred over sketch+cut)
 9. Fillet by current UI selection
 10. Edit existing fillet radius (no rebuild needed)
 11. Read parameter values for sketch math
-12. Bounding box sanity check
+12. Bounding box sanity check (always after extrudes)
 13. Clean rebuild without losing parameters
 14. Export to STL / 3MF / STEP
 15. API documentation lookup (before guessing signatures)
